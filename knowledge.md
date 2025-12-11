@@ -574,3 +574,306 @@ async function calculateFileHashWithCryptoJS(
 - [Blob.slice() 规范](https://developer.mozilla.org/en-US/docs/Web/API/Blob/slice)
 - [ReadableStream 规范](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream)
 
+---
+
+## 问题五：删除文件时显示和实际删除的文件不一致
+
+### 问题描述
+删除文件时，弹窗中显示的文件名和实际删除的文件可能不一致，导致误删文件。
+
+**潜在风险场景**：
+1. 用户在文件列表中选择了文件 A
+2. 打开删除确认弹窗，弹窗显示"删除文件 A"
+3. 在弹窗显示期间，文件列表更新（如其他操作导致列表刷新）
+4. 用户点击确认删除
+5. 由于列表更新，原来保存的索引可能指向了文件 B
+6. 结果：显示的是"删除文件 A"，但实际删除的是文件 B
+
+### 根本原因
+
+#### 1. 使用索引访问文件列表
+**问题代码**：
+```typescript
+// ❌ 错误方式：使用索引访问文件列表
+submit: async function () {
+  const promises = [];
+  for (const index of this.selected) {
+    // 问题：如果 req.items 在弹窗显示期间更新，索引可能指向错误的文件
+    promises.push(api.remove(this.req.items[index].url));
+  }
+  await Promise.all(promises);
+}
+```
+
+**问题分析**：
+- `this.selected` 存储的是文件在列表中的索引（如 `[0, 2, 5]`）
+- 删除时通过 `this.req.items[index]` 访问文件信息
+- 如果 `this.req.items` 在弹窗显示期间更新（如列表刷新、文件移动等），索引可能指向错误的文件
+- 显示时使用的是 `this.req.items[index].name`，删除时使用的是 `this.req.items[index].url`
+- 如果列表更新，这两个值可能来自不同的文件
+
+#### 2. 显示和删除使用不同的数据源
+**问题**：
+- 弹窗显示时：从 `this.req.items[index]` 获取文件名显示
+- 删除时：从 `this.req.items[index]` 获取 URL 删除
+- 如果列表在显示和删除之间更新，这两个操作可能访问到不同的文件
+
+#### 3. 回退逻辑导致不一致
+**问题代码**：
+```typescript
+// ❌ 问题：有回退逻辑，可能导致使用不一致的数据
+const urlToDelete = this.filesToDelete.length > 0 
+  ? this.filesToDelete[0].url 
+  : this.$route.path; // 回退到路由路径
+```
+
+**问题分析**：
+- 如果 `filesToDelete` 为空，回退到 `this.$route.path`
+- 但弹窗显示的文件名可能来自 `filesToDelete[0].name`
+- 如果 `filesToDelete` 为空，显示和删除使用的数据不一致
+
+### 解决方案
+
+#### 1. 在组件挂载时立即保存文件信息
+**修复代码**：
+```typescript
+export default {
+  name: "delete",
+  data() {
+    return {
+      // ✅ 在组件创建时立即保存要删除的文件信息（路径和名称）
+      // 而不是依赖索引，防止列表更新导致删除错误文件
+      filesToDelete: [],
+    };
+  },
+  mounted() {
+    // ✅ 在组件挂载时立即保存要删除的文件信息
+    // 这样可以避免在弹窗显示期间，如果文件列表更新，导致索引指向错误文件
+    this.saveFilesToDelete();
+  },
+  methods: {
+    saveFilesToDelete() {
+      this.filesToDelete = [];
+
+      if (!this.isListing) {
+        // 非列表模式：删除当前路径的文件
+        const pathParts = this.$route.path.split("/").filter((p) => p);
+        const fileName = pathParts.length > 0 ? pathParts[pathParts.length - 1] : "";
+        const fileUrl = this.$route.path;
+        
+        // ✅ 保存文件信息：name 用于显示，url 用于删除
+        // 这两个值必须对应同一个文件，且之后不再修改
+        this.filesToDelete = [{ 
+          name: fileName || fileUrl, 
+          url: fileUrl,
+          path: fileUrl,
+        }];
+        return;
+      }
+
+      // 列表模式：保存所有选中文件的信息
+      if (this.selectedCount === 0 || !this.req?.items) {
+        return;
+      }
+
+      // ✅ 立即保存文件信息（路径和名称），而不是保存索引
+      // 这样即使 req.items 在弹窗显示期间更新，也能确保删除正确的文件
+      // 关键：name、url、path 必须来自同一个 item 对象，确保数据一致性
+      for (const index of this.selected) {
+        const item = this.req.items[index];
+        if (item && item.name && item.url) {
+          // ✅ 验证：确保 name 和 url 来自同一个 item
+          // 这些数据将用于显示（name）和删除（url），必须完全一致
+          this.filesToDelete.push({
+            name: item.name,  // 显示在弹窗中的文件名
+            url: item.url,    // 用于删除的 URL（传递给 api.remove）
+            path: item.path,  // 用于后续操作（如预选）
+          });
+        }
+      }
+    },
+  },
+};
+```
+
+**关键点**：
+- 在 `mounted` 时立即保存文件信息，而不是在删除时访问
+- 保存 `name`、`url`、`path` 三个字段，确保来自同一个 `item` 对象
+- `filesToDelete` 数组在保存后不再修改（只读）
+- 显示和删除都使用这个保存的数据
+
+#### 2. 显示和删除使用同一个数据源
+**修复代码**：
+```vue
+<template>
+  <div class="card floating">
+    <div class="card-content">
+      <!-- ✅ 显示时使用保存的 filesToDelete 数据 -->
+      <div v-if="filesToDelete.length > 0" class="delete-targets">
+        <div v-if="filesToDelete.length === 1" class="delete-target-single">
+          <strong class="delete-target-name">{{ filesToDelete[0].name }}</strong>
+        </div>
+        <div v-else class="delete-target-multiple">
+          <div v-for="(file, index) in filesToDelete" :key="index">
+            <strong class="delete-target-name">{{ file.name }}</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+```
+
+```typescript
+submit: async function () {
+  // ✅ 严格检查：确保 filesToDelete 不为空
+  // 这是显示在弹窗中的数据，必须和删除时使用的数据完全一致
+  if (this.filesToDelete.length === 0) {
+    console.error("[Delete] ERROR: filesToDelete is empty");
+    this.$showError(new Error("无法删除：未找到要删除的文件"));
+    return;
+  }
+
+  if (!this.isListing) {
+    // ✅ 非列表模式：使用保存的 URL，确保和显示的文件名一致
+    const fileToDelete = this.filesToDelete[0];
+    if (!fileToDelete || !fileToDelete.url) {
+      console.error("[Delete] ERROR: Invalid fileToDelete data");
+      this.$showError(new Error("无法删除：文件数据无效"));
+      return;
+    }
+    
+    // ✅ 使用保存的 URL 删除，这是显示在弹窗中的文件的 URL
+    await api.remove(fileToDelete.url);
+    return;
+  }
+
+  // ✅ 列表模式：使用保存的文件路径列表删除
+  // 这些 URL 和显示在弹窗中的文件名（filesToDelete[].name）完全对应
+  // 确保显示和删除使用的是同一个数据源（filesToDelete 数组）
+  const promises = [];
+  for (const file of this.filesToDelete) {
+    if (!file || !file.url) {
+      console.error("[Delete] ERROR: Invalid file data");
+      continue;
+    }
+    // ✅ 使用保存的 URL，确保和显示的文件名一致
+    promises.push(api.remove(file.url));
+  }
+
+  await Promise.all(promises);
+},
+```
+
+**关键点**：
+- 显示时使用 `filesToDelete[index].name`
+- 删除时使用 `filesToDelete[index].url`
+- `name` 和 `url` 来自同一个 `item` 对象，确保对应同一个文件
+- 无回退逻辑，如果 `filesToDelete` 为空，直接报错
+
+#### 3. 添加数据验证和错误处理
+**修复代码**：
+```typescript
+saveFilesToDelete() {
+  // ... 保存逻辑 ...
+  
+  // ✅ 验证：确保保存的文件数量与选中数量一致
+  if (this.filesToDelete.length !== this.selectedCount) {
+    console.warn(
+      "[Delete] WARNING: filesToDelete length", 
+      this.filesToDelete.length, 
+      "does not match selectedCount", 
+      this.selectedCount
+    );
+  }
+},
+
+submit: async function () {
+  // ✅ 严格检查：确保 filesToDelete 不为空
+  if (this.filesToDelete.length === 0) {
+    console.error("[Delete] ERROR: filesToDelete is empty");
+    this.$showError(new Error("无法删除：未找到要删除的文件"));
+    return;
+  }
+
+  // ✅ 验证每个文件数据是否有效
+  for (const file of this.filesToDelete) {
+    if (!file || !file.url) {
+      console.error("[Delete] ERROR: Invalid file data:", file);
+      continue;
+    }
+  }
+  
+  // ... 删除逻辑 ...
+},
+```
+
+**关键点**：
+- 保存后验证数据完整性
+- 删除前验证每个文件数据是否有效
+- 添加详细的错误日志，便于调试
+
+### 数据流保证
+
+**完整的数据流**：
+1. **组件挂载** (`mounted`)：
+   - 从 `this.req.items[index]` 获取 `item`
+   - 立即保存 `{ name: item.name, url: item.url, path: item.path }` 到 `filesToDelete`
+   - `filesToDelete` 数组之后不再修改（只读）
+
+2. **显示** (模板)：
+   - 使用 `filesToDelete[index].name` 显示文件名
+   - 用户看到的是保存时的文件名
+
+3. **删除** (`submit`)：
+   - 使用 `filesToDelete[index].url` 调用 `api.remove(file.url)`
+   - 删除的是保存时的文件 URL
+
+**一致性保证**：
+- ✅ `name` 和 `url` 来自同一个 `item` 对象
+- ✅ `filesToDelete` 在保存后不再修改
+- ✅ 显示和删除使用同一个 `filesToDelete` 数组
+- ✅ 无回退逻辑，避免使用不一致的数据
+
+### 为什么这个方案有效？
+
+1. **时间点固定**：
+   - 在组件挂载时立即保存数据，此时的数据是准确的
+   - 即使后续列表更新，保存的数据不会改变
+
+2. **数据绑定**：
+   - `name` 和 `url` 来自同一个 `item` 对象
+   - 确保显示的文件名和删除的文件 URL 对应同一个文件
+
+3. **不可变性**：
+   - `filesToDelete` 数组在保存后不再修改
+   - 避免了数据在显示和删除之间被修改的风险
+
+4. **严格验证**：
+   - 删除前验证数据有效性
+   - 如果数据无效，直接报错，不继续删除
+
+### 验证方法
+
+1. **测试场景**：
+   - 选择文件 A，打开删除弹窗
+   - 在弹窗显示期间，通过其他操作更新文件列表
+   - 点击确认删除
+   - 验证删除的是文件 A，而不是其他文件
+
+2. **边界情况**：
+   - 测试删除单个文件
+   - 测试删除多个文件
+   - 测试非列表模式下的删除
+   - 测试列表更新后的删除
+
+3. **日志检查**：
+   - 检查控制台日志，确认数据保存和验证过程
+   - 如果出现警告或错误，检查数据一致性
+
+### 相关文件
+
+- 删除确认弹窗组件：`frontend/src/components/prompts/Delete.vue`
+- 文件 API：`frontend/src/api/files.ts`
+- 文件 Store：`frontend/src/stores/file.ts`
+

@@ -78,13 +78,23 @@ export default {
   methods: {
     ...mapActions(useLayoutStore, ["closeHovers"]),
     saveFilesToDelete() {
+      // 清空数组，确保每次都是全新的数据
       this.filesToDelete = [];
 
       if (!this.isListing) {
         // 非列表模式：删除当前路径的文件
+        // 从路由路径提取文件名，确保 name 和 url 对应同一个文件
         const pathParts = this.$route.path.split("/").filter((p) => p);
         const fileName = pathParts.length > 0 ? pathParts[pathParts.length - 1] : "";
-        this.filesToDelete = [{ name: fileName || this.$route.path, url: this.$route.path }];
+        const fileUrl = this.$route.path;
+        
+        // 保存文件信息：name 用于显示，url 用于删除
+        // 这两个值必须对应同一个文件，且之后不再修改
+        this.filesToDelete = [{ 
+          name: fileName || fileUrl, 
+          url: fileUrl,
+          path: fileUrl, // 保存 path 用于后续操作（如预选）
+        }];
         return;
       }
 
@@ -95,27 +105,60 @@ export default {
 
       // 立即保存文件信息（路径和名称），而不是保存索引
       // 这样即使 req.items 在弹窗显示期间更新，也能确保删除正确的文件
+      // 关键：name、url、path 必须来自同一个 item 对象，确保数据一致性
       for (const index of this.selected) {
         const item = this.req.items[index];
-        if (item) {
+        if (item && item.name && item.url) {
+          // 验证：确保 name 和 url 来自同一个 item
+          // 这些数据将用于显示（name）和删除（url），必须完全一致
           this.filesToDelete.push({
-            name: item.name,
-            url: item.url,
-            path: item.path,
+            name: item.name,  // 显示在弹窗中的文件名
+            url: item.url,    // 用于删除的 URL（传递给 api.remove）
+            path: item.path,  // 用于后续操作（如预选）
           });
+        } else {
+          console.warn("[Delete] WARNING: Invalid item at index", index, ":", item);
         }
+      }
+      
+      // 验证：确保保存的文件数量与选中数量一致
+      if (this.filesToDelete.length !== this.selectedCount) {
+        console.warn(
+          "[Delete] WARNING: filesToDelete length", 
+          this.filesToDelete.length, 
+          "does not match selectedCount", 
+          this.selectedCount
+        );
       }
     },
     submit: async function () {
       buttons.loading("delete");
 
       try {
+        // 严格检查：确保 filesToDelete 不为空
+        // 这是显示在弹窗中的数据，必须和删除时使用的数据完全一致
+        if (this.filesToDelete.length === 0) {
+          console.error("[Delete] ERROR: filesToDelete is empty, cannot proceed with deletion");
+          buttons.done("delete");
+          this.$showError(new Error("无法删除：未找到要删除的文件"));
+          return;
+        }
+
+        // 验证：确保显示的文件名和要删除的 URL 对应的是同一个文件
+        // filesToDelete 数组在 mounted 时保存，之后不再修改，确保数据一致性
         if (!this.isListing) {
-          // 使用保存的路径，而不是 this.$route.path（虽然通常相同，但更安全）
-          const urlToDelete = this.filesToDelete.length > 0 
-            ? this.filesToDelete[0].url 
-            : this.$route.path;
-          await api.remove(urlToDelete);
+          // 非列表模式：删除单个文件
+          // 使用保存的 URL，确保和显示的文件名一致
+          const fileToDelete = this.filesToDelete[0];
+          if (!fileToDelete || !fileToDelete.url) {
+            console.error("[Delete] ERROR: Invalid fileToDelete data:", fileToDelete);
+            buttons.done("delete");
+            this.$showError(new Error("无法删除：文件数据无效"));
+            return;
+          }
+          
+          // 使用保存的 URL 删除，这是显示在弹窗中的文件的 URL
+          await api.remove(fileToDelete.url);
           buttons.success("delete");
 
           this.currentPrompt?.confirm();
@@ -123,17 +166,26 @@ export default {
           return;
         }
 
+        // 列表模式：删除多个文件
         this.closeHovers();
 
-        if (this.filesToDelete.length === 0) {
-          return;
-        }
-
-        // 使用保存的文件路径列表，而不是通过索引访问 req.items
-        // 这样可以确保即使文件列表在弹窗显示期间更新，也能删除正确的文件
+        // 使用保存的文件路径列表删除
+        // 这些 URL 和显示在弹窗中的文件名（filesToDelete[].name）完全对应
+        // 确保显示和删除使用的是同一个数据源（filesToDelete 数组）
         const promises = [];
         for (const file of this.filesToDelete) {
+          if (!file || !file.url) {
+            console.error("[Delete] ERROR: Invalid file data in filesToDelete:", file);
+            continue;
+          }
+          // 使用保存的 URL，确保和显示的文件名一致
           promises.push(api.remove(file.url));
+        }
+
+        if (promises.length === 0) {
+          buttons.done("delete");
+          this.$showError(new Error("无法删除：没有有效的文件数据"));
+          return;
         }
 
         await Promise.all(promises);
