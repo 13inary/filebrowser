@@ -172,6 +172,9 @@ export const useUploadStore = defineStore("upload", () => {
           sentBytes.value += upload.rawProgress.sentBytes - upload.sentBytes;
           upload.sentBytes = upload.rawProgress.sentBytes;
           
+          // Release file reference to allow garbage collection (same as in finishUpload)
+          upload.file = null;
+          
           // Continue processing other uploads (will be handled after unlock)
           // Don't call processUploads() here directly to avoid recursion
           return;
