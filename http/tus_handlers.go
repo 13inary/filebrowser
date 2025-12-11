@@ -18,6 +18,7 @@ import (
 
 	"github.com/filebrowser/filebrowser/v2/files"
 	"github.com/filebrowser/filebrowser/v2/rules"
+	"github.com/filebrowser/filebrowser/v2/blacklist"
 )
 
 const maxUploadWait = 3 * time.Minute
@@ -114,6 +115,13 @@ func tusPostHandler() handleFunc {
 		if !d.user.Perm.Create || !d.Check(r.URL.Path) {
 			return http.StatusForbidden, nil
 		}
+
+		// Check file blacklist before processing upload
+		blacklistChecker := blacklist.NewChecker()
+		if err := blacklistChecker.Check(r.URL.Path); err != nil {
+			return http.StatusForbidden, err
+		}
+
 		file, err := files.NewFileInfo(&files.FileOptions{
 			Fs:         d.user.Fs,
 			Path:       r.URL.Path,

@@ -22,6 +22,7 @@ import (
 	"github.com/filebrowser/filebrowser/v2/files"
 	"github.com/filebrowser/filebrowser/v2/fileutils"
 	"github.com/filebrowser/filebrowser/v2/rules"
+	"github.com/filebrowser/filebrowser/v2/blacklist"
 )
 
 var resourceGetHandler = withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
@@ -110,6 +111,12 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 		if strings.HasSuffix(r.URL.Path, "/") {
 			err := d.user.Fs.MkdirAll(r.URL.Path, d.settings.DirMode)
 			return errToStatus(err), err
+		}
+
+		// Check file blacklist before processing upload
+		blacklistChecker := blacklist.NewChecker()
+		if err := blacklistChecker.Check(r.URL.Path); err != nil {
+			return http.StatusForbidden, err
 		}
 
 		file, err := files.NewFileInfo(&files.FileOptions{
