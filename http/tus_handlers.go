@@ -16,9 +16,9 @@ import (
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/spf13/afero"
 
+	"github.com/filebrowser/filebrowser/v2/blacklist"
 	"github.com/filebrowser/filebrowser/v2/files"
 	"github.com/filebrowser/filebrowser/v2/rules"
-	"github.com/filebrowser/filebrowser/v2/blacklist"
 )
 
 const maxUploadWait = 3 * time.Minute
@@ -130,6 +130,7 @@ func tusPostHandler() handleFunc {
 			ReadHeader: d.server.TypeDetectionByHeader,
 			Checker:    d,
 		})
+		fileExistedBefore := file != nil // Track if file existed before OpenFile
 		switch {
 		case errors.Is(err, afero.ErrFileNotFound):
 			dirPath := filepath.Dir(r.URL.Path)
@@ -179,11 +180,19 @@ func tusPostHandler() handleFunc {
 			Content:    false,
 		})
 		if err != nil {
+			// Clean up file only if it was just created (didn't exist before)
+			if !fileExistedBefore {
+				_ = d.user.Fs.RemoveAll(r.URL.Path)
+			}
 			return errToStatus(err), err
 		}
 
 		uploadLength, err := getUploadLength(r)
 		if err != nil {
+			// Clean up file only if it was just created (didn't exist before)
+			if !fileExistedBefore {
+				_ = d.user.Fs.RemoveAll(r.URL.Path)
+			}
 			return http.StatusBadRequest, fmt.Errorf("invalid upload length: %w", err)
 		}
 
@@ -192,6 +201,10 @@ func tusPostHandler() handleFunc {
 
 		// Require checksum for file integrity verification
 		if len(checksums) == 0 {
+			// Clean up file only if it was just created (didn't exist before)
+			if !fileExistedBefore {
+				_ = d.user.Fs.RemoveAll(r.URL.Path)
+			}
 			return http.StatusBadRequest, fmt.Errorf("Upload-Checksum header is required for file integrity verification")
 		}
 
@@ -200,6 +213,12 @@ func tusPostHandler() handleFunc {
 
 		path, err := url.JoinPath("/", d.server.BaseURL, "/api/tus", r.URL.Path)
 		if err != nil {
+			// Clean up file and unregister upload if path join fails
+			// Only remove file if it was just created (didn't exist before)
+			completeUpload(file.RealPath())
+			if !fileExistedBefore {
+				_ = d.user.Fs.RemoveAll(r.URL.Path)
+			}
 			return http.StatusBadRequest, fmt.Errorf("invalid path: %w", err)
 		}
 
