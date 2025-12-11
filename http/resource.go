@@ -372,7 +372,11 @@ func verifyUploadIntegrityForPost(fs afero.Fs, filePath string, expectedSize int
 		expectedHashNormalized := strings.ToLower(strings.TrimSpace(expectedHash))
 		actualHashNormalized := strings.ToLower(strings.TrimSpace(actualHash))
 
-		if actualHashNormalized != expectedHashNormalized {
+		// Log hash verification result
+		if actualHashNormalized == expectedHashNormalized {
+			log.Printf("[Upload Integrity] File hash verification passed: path=%s, size=%d, algorithm=%s, hash=%s", filePath, file.Size, algo, actualHashNormalized)
+		} else {
+			log.Printf("[Upload Integrity] File hash verification failed: path=%s, size=%d, algorithm=%s, expected=%s, actual=%s", filePath, file.Size, algo, expectedHashNormalized, actualHashNormalized)
 			return fmt.Errorf("%s checksum mismatch: expected %s (normalized: %s), got %s (normalized: %s)", algo, expectedHash, expectedHashNormalized, actualHash, actualHashNormalized)
 		}
 	}
