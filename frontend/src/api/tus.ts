@@ -29,24 +29,31 @@ export async function upload(
     return false;
   }
   
-  // Calculate file hash for integrity verification (if content is a Blob/File)
+  // Calculate file hash for integrity verification (required for TUS uploads)
   let checksumHeader = "";
   if (content instanceof Blob) {
     const hash = await calculateFileHashSafe(content, "sha256");
-    if (hash) {
-      checksumHeader = `sha256 ${hash}`;
+    if (!hash) {
+      // Hash calculation failed - reject TUS upload
+      // This will cause the system to fall back to regular POST upload
+      const fileName = content instanceof File ? content.name : 'file';
+      const fileSizeMB = (content.size / 1024 / 1024).toFixed(2);
+      return Promise.reject(new Error(
+        `无法计算文件哈希值（文件: ${fileName}, 大小: ${fileSizeMB}MB）。` +
+        `请检查浏览器控制台获取详细信息，或尝试使用其他浏览器。`
+      ));
     }
+    checksumHeader = `sha256 ${hash}`;
+  } else {
+    // Non-Blob content cannot be hashed - reject TUS upload
+    return Promise.reject(new Error("TUS upload requires Blob content for integrity verification"));
   }
   
   return new Promise<void | string>((resolve, reject) => {
     const uploadHeaders: Record<string, string> = {
       "X-Auth": authStore.jwt,
+      "Upload-Checksum": checksumHeader, // Always set checksum header (required by backend)
     };
-    
-    // Add checksum header if calculated successfully
-    if (checksumHeader) {
-      uploadHeaders["Upload-Checksum"] = checksumHeader;
-    }
     
     const upload = new tus.Upload(content, {
       endpoint: `${origin}${baseURL}${resourcePath}`,

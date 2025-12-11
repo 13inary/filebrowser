@@ -18,9 +18,11 @@
   },
   "dependencies": {
     "@chenfengyuan/vue-number-input": "^2.0.1",
+    "@types/crypto-js": "^4.2.2",
     "@vueuse/core": "^14.0.0",
     "@vueuse/integrations": "^14.0.0",
     "ace-builds": "^1.43.2",
+    "crypto-js": "^4.2.0",
     "dayjs": "^1.11.13",
     "dompurify": "^3.2.6",
     "epubjs": "^0.3.93",

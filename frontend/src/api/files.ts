@@ -102,9 +102,25 @@ export async function post(
       !["http:", "https:"].includes(window.location.protocol)) ||
     // Tus is disabled / not applicable
     !(await useTus(content));
-  return useResourcesApi
-    ? postResources(url, content, overwrite, onupload)
-    : postTus(url, content, overwrite, onupload);
+  
+  if (useResourcesApi) {
+    return postResources(url, content, overwrite, onupload);
+  }
+  
+  // Try TUS upload, fall back to POST if it fails (but not for hash calculation failures)
+  try {
+    return await postTus(url, content, overwrite, onupload);
+  } catch (error: any) {
+    // If TUS upload fails due to hash calculation, don't fall back (POST will also fail)
+    // Only fall back for other errors (network issues, server errors, etc.)
+    if (error?.message?.includes("hash") || error?.message?.includes("integrity")) {
+      // Hash calculation failed - don't fall back, let it fail
+      throw error;
+    }
+    // For other errors (network, server, etc.), fall back to regular POST
+    console.warn("TUS upload failed, falling back to regular POST:", error);
+    return postResources(url, content, overwrite, onupload);
+  }
 }
 
 async function postResources(
@@ -119,15 +135,22 @@ async function postResources(
   let expectedSizeHeader = "";
   let checksumHeader = "";
   
-  // Calculate file size and hash for integrity verification (if content is a Blob/File)
+  // Calculate file size and hash for integrity verification (required for POST uploads)
   if (content instanceof Blob) {
     expectedSizeHeader = content.size.toString();
     
-    // Calculate hash for integrity verification
+    // Calculate hash for integrity verification (required by backend)
     const hash = await calculateFileHashSafe(content, "sha256");
-    if (hash) {
-      checksumHeader = `sha256:${hash}`;
+    if (!hash) {
+      // Hash calculation failed - reject upload
+      const fileName = content instanceof File ? content.name : 'file';
+      const fileSizeMB = (content.size / 1024 / 1024).toFixed(2);
+      return Promise.reject(new Error(
+        `无法计算文件哈希值（文件: ${fileName}, 大小: ${fileSizeMB}MB）。` +
+        `请检查浏览器控制台获取详细信息，或尝试使用其他浏览器。`
+      ));
     }
+    checksumHeader = `sha256:${hash}`;
     
     if (
       !["http:", "https:"].includes(window.location.protocol)
