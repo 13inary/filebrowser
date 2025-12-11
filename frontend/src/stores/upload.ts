@@ -113,28 +113,11 @@ export const useUploadStore = defineStore("upload", () => {
     
     try {
       // Check if all uploads are finished (either completed or failed)
+      // This check is done at the start to handle the case where processUploads
+      // is called when all uploads are already complete
       if (!hasUnfinishedUploads()) {
-        const fileStore = useFileStore();
-        window.removeEventListener("beforeunload", beforeUnload);
-        
-        // Check if there are any failed uploads
-        const hasFailedUploads = allUploads.value.some((u) => u.failed);
-        
-        if (hasFailedUploads) {
-          // Show error state instead of success
-          buttons.done("upload");
-          // Don't reset immediately, let user see the error
-          // Reset after a delay to allow error message to be visible
-          setTimeout(() => {
-            reset();
-            fileStore.reload = true;
-          }, 3000);
-        } else {
-          // All uploads succeeded
-          buttons.success("upload");
-          reset();
-          fileStore.reload = true;
-        }
+        // Completion logic will be handled in finally block to ensure it runs
+        // even when the last upload finishes during processing
         return;
       }
 
@@ -204,11 +187,35 @@ export const useUploadStore = defineStore("upload", () => {
       
       // After unlocking, check if there are more uploads to process
       // Use setTimeout to avoid immediate recursion and allow state to settle
-      if (hasUnfinishedUploads()) {
-        setTimeout(() => {
+      setTimeout(() => {
+        // Check if all uploads are finished - if so, execute completion logic
+        if (!hasUnfinishedUploads()) {
+          const fileStore = useFileStore();
+          window.removeEventListener("beforeunload", beforeUnload);
+          
+          // Check if there are any failed uploads
+          const hasFailedUploads = allUploads.value.some((u) => u.failed);
+          
+          if (hasFailedUploads) {
+            // Show error state instead of success
+            buttons.done("upload");
+            // Don't reset immediately, let user see the error
+            // Reset after a delay to allow error message to be visible
+            setTimeout(() => {
+              reset();
+              fileStore.reload = true;
+            }, 3000);
+          } else {
+            // All uploads succeeded
+            buttons.success("upload");
+            reset();
+            fileStore.reload = true;
+          }
+        } else {
+          // There are still uploads to process, continue
           processUploads();
-        }, 0);
-      }
+        }
+      }, 0);
     }
   };
 
