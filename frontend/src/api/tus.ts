@@ -2,6 +2,7 @@ import * as tus from "tus-js-client";
 import { baseURL, tusEndpoint, tusSettings, origin } from "@/utils/constants";
 import { useAuthStore } from "@/stores/auth";
 import { removePrefix } from "@/api/utils";
+import { calculateFileHashSafe } from "@/utils/hash";
 
 const RETRY_BASE_DELAY = 1000;
 const RETRY_MAX_DELAY = 20000;
@@ -27,16 +28,33 @@ export async function upload(
   if (content === "") {
     return false;
   }
+  
+  // Calculate file hash for integrity verification (if content is a Blob/File)
+  let checksumHeader = "";
+  if (content instanceof Blob) {
+    const hash = await calculateFileHashSafe(content, "sha256");
+    if (hash) {
+      checksumHeader = `sha256 ${hash}`;
+    }
+  }
+  
   return new Promise<void | string>((resolve, reject) => {
+    const uploadHeaders: Record<string, string> = {
+      "X-Auth": authStore.jwt,
+    };
+    
+    // Add checksum header if calculated successfully
+    if (checksumHeader) {
+      uploadHeaders["Upload-Checksum"] = checksumHeader;
+    }
+    
     const upload = new tus.Upload(content, {
       endpoint: `${origin}${baseURL}${resourcePath}`,
       chunkSize: tusSettings.chunkSize,
       retryDelays: computeRetryDelays(tusSettings),
       parallelUploads: 1,
       storeFingerprintForResuming: false,
-      headers: {
-        "X-Auth": authStore.jwt,
-      },
+      headers: uploadHeaders,
       onShouldRetry: function (err) {
         const status = err.originalResponse
           ? err.originalResponse.getStatus()

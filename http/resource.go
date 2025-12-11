@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/shirou/gopsutil/v4/disk"
@@ -20,6 +21,7 @@ import (
 	fberrors "github.com/filebrowser/filebrowser/v2/errors"
 	"github.com/filebrowser/filebrowser/v2/files"
 	"github.com/filebrowser/filebrowser/v2/fileutils"
+	"github.com/filebrowser/filebrowser/v2/rules"
 )
 
 var resourceGetHandler = withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
@@ -134,10 +136,33 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 			}
 		}
 
+		// Parse expected size and checksum from headers if provided
+		var expectedSize int64 = -1
+		if sizeStr := r.Header.Get("X-Expected-Size"); sizeStr != "" {
+			if size, parseErr := strconv.ParseInt(sizeStr, 10, 64); parseErr == nil {
+				expectedSize = size
+			}
+		}
+
+		expectedChecksums := parseChecksumHeaderForPost(r)
+
 		err = d.RunHook(func() error {
 			info, writeErr := writeFile(d.user.Fs, r.URL.Path, r.Body, d.settings.FileMode, d.settings.DirMode)
 			if writeErr != nil {
 				return writeErr
+			}
+
+			// Verify file integrity if expected size or checksum provided
+			if expectedSize >= 0 || len(expectedChecksums) > 0 {
+				verifySize := expectedSize
+				if verifySize < 0 {
+					verifySize = info.Size() // Use actual size if not provided
+				}
+				if verifyErr := verifyUploadIntegrityForPost(d.user.Fs, r.URL.Path, verifySize, expectedChecksums, d); verifyErr != nil {
+					// Remove file if integrity check fails
+					_ = d.user.Fs.RemoveAll(r.URL.Path)
+					return fmt.Errorf("upload integrity check failed: %w", verifyErr)
+				}
 			}
 
 			etag := fmt.Sprintf(`"%x%x"`, info.ModTime().UnixNano(), info.Size())
@@ -294,6 +319,74 @@ func writeFile(afs afero.Fs, dst string, in io.Reader, fileMode, dirMode fs.File
 	}
 
 	return info, nil
+}
+
+// verifyUploadIntegrityForPost verifies file size and optional checksums for POST uploads
+func verifyUploadIntegrityForPost(fs afero.Fs, filePath string, expectedSize int64, expectedChecksums map[string]string, checker rules.Checker) error {
+	file, err := files.NewFileInfo(&files.FileOptions{
+		Fs:         fs,
+		Path:       filePath,
+		Modify:     false,
+		Expand:     false,
+		ReadHeader: false,
+		Checker:    checker,
+		Content:    false,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	// Verify file size
+	if file.Size != expectedSize {
+		return fmt.Errorf("file size mismatch: expected %d, got %d", expectedSize, file.Size)
+	}
+
+	// Verify checksums if provided
+	if len(expectedChecksums) > 0 {
+		for algo, expectedHash := range expectedChecksums {
+			if err := file.Checksum(algo); err != nil {
+				return fmt.Errorf("failed to compute %s checksum: %w", algo, err)
+			}
+
+			actualHash, ok := file.Checksums[algo]
+			if !ok {
+				return fmt.Errorf("checksum algorithm %s not supported", algo)
+			}
+
+			if actualHash != expectedHash {
+				return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHash, actualHash)
+			}
+		}
+	}
+
+	return nil
+}
+
+// parseChecksumHeaderForPost parses checksum from request headers for POST uploads
+// Supports format: "X-Upload-Checksum: <algorithm>:<hash>" or "X-Upload-Checksum-<algorithm>: <hash>"
+func parseChecksumHeaderForPost(r *http.Request) map[string]string {
+	checksums := make(map[string]string)
+
+	// Try format: "X-Upload-Checksum: algorithm:hash"
+	if checksumHeader := r.Header.Get("X-Upload-Checksum"); checksumHeader != "" {
+		parts := strings.SplitN(checksumHeader, ":", 2)
+		if len(parts) == 2 {
+			algo := strings.TrimSpace(parts[0])
+			hash := strings.TrimSpace(parts[1])
+			if algo == "md5" || algo == "sha1" || algo == "sha256" || algo == "sha512" {
+				checksums[algo] = hash
+			}
+		}
+	}
+
+	// Try format: "X-Upload-Checksum-<algorithm>: <hash>"
+	for _, algo := range []string{"md5", "sha1", "sha256", "sha512"} {
+		if hash := r.Header.Get("X-Upload-Checksum-" + algo); hash != "" {
+			checksums[algo] = strings.TrimSpace(hash)
+		}
+	}
+
+	return checksums
 }
 
 func delThumbs(ctx context.Context, fileCache FileCache, file *files.FileInfo) error {

@@ -133,7 +133,7 @@ func writeFile(afs afero.Fs, dst string, in io.Reader, fileMode, dirMode fs.File
 
 **问题发现**:
 1. ✅ **文件同步**: ~~`io.Copy` 后没有调用 `file.Sync()`，数据可能还在操作系统缓冲区中~~ **已修复** - 已在 `writeFile` 函数中添加 `file.Sync()` 调用
-2. **没有校验**: 写入后没有验证文件大小或校验和
+2. ✅ **文件完整性校验**: ~~写入后没有验证文件大小或校验和~~ **已修复** - 已添加大小和校验和验证机制（见问题 4）
 3. **错误处理不完整**: 如果 `io.Copy` 部分成功，文件可能处于不完整状态
 
 ---
@@ -237,32 +237,39 @@ cache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason, item *t
 - ✅ 服务器崩溃时数据丢失风险显著降低
 - ⚠️ 注意：某些文件系统（如网络文件系统）可能不支持同步，但代码已做兼容处理
 
-#### 问题 4: 没有文件完整性校验 ⚠️ **低风险**
+#### 问题 4: 没有文件完整性校验 ✅ **已修复**
 
-**问题描述**:
+**修复状态**: ✅ **已修复** - 已添加文件大小和校验和验证机制
+
+**原问题描述**:
 - 上传完成后没有验证文件大小是否匹配预期
 - 没有校验和验证机制
 - 无法检测传输过程中的数据损坏
 
-**影响**:
-- 可能上传损坏的文件而不自知
-- 文件大小不匹配时可能无法及时发现
+**修复内容**:
+- ✅ 在 TUS 上传完成时自动验证文件大小
+- ✅ 支持通过 `Upload-Checksum` 头提供校验和（MD5、SHA1、SHA256、SHA512）
+- ✅ 在普通 POST 上传时支持通过 `X-Expected-Size` 和 `X-Upload-Checksum` 头进行验证
+- ✅ 验证失败时自动删除不完整的文件
+- ✅ 使用 `FileInfo.Checksum()` 方法计算并比较校验和
 
-**避免操作（当前代码限制下的应对方案）**:
-1. ⚠️ **上传后手动验证文件**
-   - 上传完成后，立即下载文件并验证文件大小
-   - 对于重要文件，计算并比较校验和（MD5/SHA256）
-   - 使用文件管理器检查文件是否可以正常打开
+**修复后的影响**:
+- ✅ 上传完成后自动验证文件大小，确保文件完整
+- ✅ 支持校验和验证，可检测传输过程中的数据损坏
+- ✅ 验证失败时自动清理，避免留下损坏的文件
+- ✅ **前端自动计算并发送校验和**，用户无需手动操作
 
-2. ⚠️ **使用客户端校验**
-   - 在上传前计算文件的校验和
-   - 上传后通过 API 获取文件信息并比较
-   - 如果发现不匹配，重新上传
+**实现细节**:
+- ✅ **后端**: 支持接收并验证 `Upload-Checksum` (TUS) 和 `X-Upload-Checksum` (POST) 头
+- ✅ **前端**: 自动使用 Web Crypto API 计算 SHA-256 校验和并在上传时发送
+- ✅ **TUS 上传**: 前端自动在 POST 请求头中添加 `Upload-Checksum: sha256 <hash>`
+- ✅ **普通 POST 上传**: 前端自动添加 `X-Expected-Size: <size>` 和 `X-Upload-Checksum: sha256:<hash>`
+- ✅ **错误处理**: 如果 hash 计算失败，上传仍会继续（向后兼容）
 
-3. ⚠️ **无法完全避免**
-   - 传输过程中的数据损坏**无法通过操作完全避免**
-   - 网络传输错误、磁盘错误等都可能导致数据损坏
-   - 建议：等待代码修复添加自动校验机制，或使用支持校验的传输工具
+**前端实现位置**:
+- Hash 计算工具: `frontend/src/utils/hash.ts`
+- TUS 上传集成: `frontend/src/api/tus.ts`
+- 普通 POST 上传集成: `frontend/src/api/files.ts`
 
 ### 2.2 潜在问题
 
@@ -562,7 +569,7 @@ onShouldRetry: function (err) {
 | 文件写入未同步到磁盘 | 🟡 中 | 服务器崩溃可能丢失数据 | `http/resource.go:278` | ✅ 已修复 |
 | 不完整文件清理不完善 | 🟡 中 | 磁盘空间浪费 | `http/tus_handlers.go:28-32` | ⚠️ 待修复 |
 | 浏览器关闭无法恢复上传 | 🟡 中 | 用户体验差 | `frontend/src/stores/upload.ts` | ⚠️ 待修复 |
-| 没有文件完整性校验 | 🟢 低 | 可能上传损坏文件 | 多处 | ⚠️ 待修复 |
+| 没有文件完整性校验 | 🟢 低 | 可能上传损坏文件 | 多处 | ✅ 已修复 |
 
 ### 4.2 改进建议
 
@@ -669,27 +676,35 @@ func cleanupIncompleteUploads() {
 }
 ```
 
-#### 建议 5: 添加文件完整性校验 🟢 **低优先级**
+#### 建议 5: 添加文件完整性校验 ✅ **已实现**
 
-**方案**:
-- 上传完成后验证文件大小
-- 可选：计算并验证校验和（MD5/SHA256）
+**状态**: ✅ **已完成** - 已实现文件大小和校验和验证机制（后端 + 前端）
 
-**实现示例**:
-```go
-func verifyUpload(filePath string, expectedSize int64) error {
-    info, err := os.Stat(filePath)
-    if err != nil {
-        return err
-    }
-    
-    if info.Size() != expectedSize {
-        return fmt.Errorf("file size mismatch: expected %d, got %d", expectedSize, info.Size())
-    }
-    
-    return nil
-}
-```
+**后端实现内容**:
+- ✅ 在 TUS 上传完成时自动验证文件大小
+- ✅ 支持通过 HTTP 头提供校验和（MD5、SHA1、SHA256、SHA512）
+- ✅ 在普通 POST 上传时支持大小和校验和验证
+- ✅ 验证失败时自动删除不完整的文件
+- ✅ 使用现有的 `FileInfo.Checksum()` 方法进行校验和计算
+
+**前端实现内容**:
+- ✅ 创建了 `hash.ts` 工具模块，使用 Web Crypto API 计算文件 hash
+- ✅ TUS 上传时自动计算 SHA-256 并添加到 `Upload-Checksum` 头
+- ✅ 普通 POST 上传时自动计算文件大小和 SHA-256，添加到相应请求头
+- ✅ 错误处理：hash 计算失败时不影响上传（向后兼容）
+- ✅ 用户无需任何手动操作，完全自动化
+
+**实现文件**:
+- 后端: `http/tus_handlers.go`, `http/resource.go`
+- 前端: `frontend/src/utils/hash.ts`, `frontend/src/api/tus.ts`, `frontend/src/api/files.ts`
+
+**支持的校验和算法**: 
+- 后端支持: MD5、SHA1、SHA256、SHA512
+- 前端自动计算: SHA-256（使用 Web Crypto API，浏览器原生支持）
+
+**HTTP 头格式**:
+- TUS 上传: `Upload-Checksum: sha256 <hash>` (前端自动添加)
+- 普通 POST: `X-Expected-Size: <size>` 和 `X-Upload-Checksum: sha256:<hash>` (前端自动添加)
 
 #### 建议 6: 改进错误处理和回滚 🟢 **低优先级**
 
@@ -796,7 +811,7 @@ FileBrowser 项目在文件上传功能上存在以下主要问题：
 3. **浏览器关闭后无法恢复** - 需要启用断点续传指纹存储
 4. **服务器崩溃后无法恢复** - 需要启动时恢复机制
 5. **不完整文件自动清理** - 需要启动时清理机制
-6. **文件完整性自动校验** - 需要添加校验机制
+6. ✅ **文件完整性自动校验** - ~~需要添加校验机制~~ **已修复**
 
 ### 7.4 紧急情况处理
 

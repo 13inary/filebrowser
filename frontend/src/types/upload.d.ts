@@ -9,6 +9,8 @@ type Upload = {
   rawProgress: {
     sentBytes: number;
   };
+  failed?: boolean;
+  error?: string;
 };
 
 interface UploadEntry {

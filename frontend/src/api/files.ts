@@ -3,6 +3,7 @@ import { useLayoutStore } from "@/stores/layout";
 import { baseURL } from "@/utils/constants";
 import { upload as postTus, useTus } from "./tus";
 import { createURL, fetchURL, removePrefix, StatusError } from "./utils";
+import { calculateFileHashSafe } from "@/utils/hash";
 
 export async function fetch(url: string, signal?: AbortSignal) {
   url = removePrefix(url);
@@ -115,11 +116,24 @@ async function postResources(
   url = removePrefix(url);
 
   let bufferContent: ArrayBuffer;
-  if (
-    content instanceof Blob &&
-    !["http:", "https:"].includes(window.location.protocol)
-  ) {
-    bufferContent = await new Response(content).arrayBuffer();
+  let expectedSizeHeader = "";
+  let checksumHeader = "";
+  
+  // Calculate file size and hash for integrity verification (if content is a Blob/File)
+  if (content instanceof Blob) {
+    expectedSizeHeader = content.size.toString();
+    
+    // Calculate hash for integrity verification
+    const hash = await calculateFileHashSafe(content, "sha256");
+    if (hash) {
+      checksumHeader = `sha256:${hash}`;
+    }
+    
+    if (
+      !["http:", "https:"].includes(window.location.protocol)
+    ) {
+      bufferContent = await new Response(content).arrayBuffer();
+    }
   }
 
   const authStore = useAuthStore();
@@ -131,6 +145,16 @@ async function postResources(
       true
     );
     request.setRequestHeader("X-Auth", authStore.jwt);
+    
+    // Add expected size header if available
+    if (expectedSizeHeader) {
+      request.setRequestHeader("X-Expected-Size", expectedSizeHeader);
+    }
+    
+    // Add checksum header if calculated successfully
+    if (checksumHeader) {
+      request.setRequestHeader("X-Upload-Checksum", checksumHeader);
+    }
 
     if (typeof onupload === "function") {
       request.upload.onprogress = onupload;

@@ -2,6 +2,7 @@ package fbhttp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,16 +17,23 @@ import (
 	"github.com/spf13/afero"
 
 	"github.com/filebrowser/filebrowser/v2/files"
+	"github.com/filebrowser/filebrowser/v2/rules"
 )
 
 const maxUploadWait = 3 * time.Minute
 
-// Tracks active uploads along with their respective upload lengths
+// UploadInfo stores information about an active upload
+type UploadInfo struct {
+	Length   int64             `json:"length"`
+	Checksum map[string]string `json:"checksum,omitempty"` // algorithm -> hash
+}
+
+// Tracks active uploads along with their respective upload lengths and checksums
 var activeUploads = initActiveUploads()
 
-func initActiveUploads() *ttlcache.Cache[string, int64] {
-	cache := ttlcache.New[string, int64]()
-	cache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason, item *ttlcache.Item[string, int64]) {
+func initActiveUploads() *ttlcache.Cache[string, string] {
+	cache := ttlcache.New[string, string]()
+	cache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason, item *ttlcache.Item[string, string]) {
 		if reason == ttlcache.EvictionReasonExpired {
 			fmt.Printf("deleting incomplete upload file: \"%s\"", item.Key())
 			os.Remove(item.Key())
@@ -36,21 +44,47 @@ func initActiveUploads() *ttlcache.Cache[string, int64] {
 	return cache
 }
 
-func registerUpload(filePath string, fileSize int64) {
-	activeUploads.Set(filePath, fileSize, maxUploadWait)
+func registerUpload(filePath string, fileSize int64, checksum map[string]string) {
+	info := UploadInfo{
+		Length:   fileSize,
+		Checksum: checksum,
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		// Fallback to storing only size if JSON marshaling fails
+		data = []byte(fmt.Sprintf(`{"length":%d}`, fileSize))
+	}
+	activeUploads.Set(filePath, string(data), maxUploadWait)
 }
 
 func completeUpload(filePath string) {
 	activeUploads.Delete(filePath)
 }
 
-func getActiveUploadLength(filePath string) (int64, error) {
+func getActiveUploadInfo(filePath string) (*UploadInfo, error) {
 	item := activeUploads.Get(filePath)
 	if item == nil {
-		return 0, fmt.Errorf("no active upload found for the given path")
+		return nil, fmt.Errorf("no active upload found for the given path")
 	}
 
-	return item.Value(), nil
+	var info UploadInfo
+	if err := json.Unmarshal([]byte(item.Value()), &info); err != nil {
+		// Fallback: try to parse as just a number (backward compatibility)
+		if length, err := strconv.ParseInt(item.Value(), 10, 64); err == nil {
+			return &UploadInfo{Length: length}, nil
+		}
+		return nil, fmt.Errorf("failed to parse upload info: %w", err)
+	}
+
+	return &info, nil
+}
+
+func getActiveUploadLength(filePath string) (int64, error) {
+	info, err := getActiveUploadInfo(filePath)
+	if err != nil {
+		return 0, err
+	}
+	return info.Length, nil
 }
 
 func keepUploadActive(filePath string) func() {
@@ -145,8 +179,11 @@ func tusPostHandler() handleFunc {
 			return http.StatusBadRequest, fmt.Errorf("invalid upload length: %w", err)
 		}
 
+		// Parse checksum from header if provided
+		checksums := parseChecksumHeader(r)
+
 		// Enables the user to utilize the PATCH endpoint for uploading file data
-		registerUpload(file.RealPath(), uploadLength)
+		registerUpload(file.RealPath(), uploadLength, checksums)
 
 		path, err := url.JoinPath("/", d.server.BaseURL, "/api/tus", r.URL.Path)
 		if err != nil {
@@ -267,6 +304,18 @@ func tusPatchHandler() handleFunc {
 		w.Header().Set("Upload-Offset", strconv.FormatInt(newOffset, 10))
 
 		if newOffset >= uploadLength {
+			// Verify file integrity before completing upload
+			uploadInfo, err := getActiveUploadInfo(file.RealPath())
+			if err == nil {
+				// Use r.URL.Path (relative path) instead of file.RealPath() (absolute path)
+				// because NewFileInfo expects a path relative to the filesystem root
+				if verifyErr := verifyUploadIntegrity(d.user.Fs, r.URL.Path, uploadInfo.Length, uploadInfo.Checksum, d); verifyErr != nil {
+					completeUpload(file.RealPath())
+					_ = d.user.Fs.RemoveAll(r.URL.Path)
+					return http.StatusBadRequest, fmt.Errorf("upload integrity check failed: %w", verifyErr)
+				}
+			}
+
 			completeUpload(file.RealPath())
 			_ = d.RunHook(func() error { return nil }, "upload", r.URL.Path, "", d.user)
 		}
@@ -323,4 +372,91 @@ func getUploadOffset(r *http.Request) (int64, error) {
 		return 0, fmt.Errorf("invalid upload offset: %w", err)
 	}
 	return uploadOffset, nil
+}
+
+// verifyUploadIntegrity verifies file size and optional checksums
+func verifyUploadIntegrity(fs afero.Fs, filePath string, expectedSize int64, expectedChecksums map[string]string, checker rules.Checker) error {
+	file, err := files.NewFileInfo(&files.FileOptions{
+		Fs:         fs,
+		Path:       filePath,
+		Modify:     false,
+		Expand:     false,
+		ReadHeader: false,
+		Checker:    checker,
+		Content:    false,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	// Verify file size
+	if file.Size != expectedSize {
+		return fmt.Errorf("file size mismatch: expected %d, got %d", expectedSize, file.Size)
+	}
+
+	// Verify checksums if provided
+	if len(expectedChecksums) > 0 {
+		for algo, expectedHash := range expectedChecksums {
+			if err := file.Checksum(algo); err != nil {
+				return fmt.Errorf("failed to compute %s checksum: %w", algo, err)
+			}
+
+			actualHash, ok := file.Checksums[algo]
+			if !ok {
+				return fmt.Errorf("checksum algorithm %s not supported", algo)
+			}
+
+			if actualHash != expectedHash {
+				return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHash, actualHash)
+			}
+		}
+	}
+
+	return nil
+}
+
+// parseChecksumHeader parses checksum from request headers
+// Supports TUS format: "Upload-Checksum: <algorithm> <hash>"
+// Example: "Upload-Checksum: sha256 abc123def456..."
+func parseChecksumHeader(r *http.Request) map[string]string {
+	checksumHeader := r.Header.Get("Upload-Checksum")
+	if checksumHeader == "" {
+		return nil
+	}
+
+	checksums := make(map[string]string)
+
+	// Parse format: "algorithm hash" (TUS standard format)
+	// Find first space to separate algorithm and hash
+	spaceIdx := -1
+	for i, c := range checksumHeader {
+		if c == ' ' {
+			spaceIdx = i
+			break
+		}
+	}
+
+	if spaceIdx > 0 && spaceIdx < len(checksumHeader)-1 {
+		algo := checksumHeader[:spaceIdx]
+		hash := checksumHeader[spaceIdx+1:]
+		// Validate algorithm
+		if algo == "md5" || algo == "sha1" || algo == "sha256" || algo == "sha512" {
+			checksums[algo] = hash
+		}
+	} else {
+		// No space found, try to detect algorithm by hash length
+		hash := checksumHeader
+		switch len(hash) {
+		case 32:
+			checksums["md5"] = hash
+		case 40:
+			checksums["sha1"] = hash
+		case 64:
+			checksums["sha256"] = hash
+		case 128:
+			checksums["sha512"] = hash
+		}
+	}
+
+	return checksums
 }

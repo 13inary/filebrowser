@@ -88,18 +88,45 @@ export const useUploadStore = defineStore("upload", () => {
 
   const hasActiveUploads = () => activeUploads.value.size > 0;
 
-  const hasPendingUploads = () =>
-    allUploads.value.length > lastUpload.value + 1;
+  const hasPendingUploads = () => {
+    // Check if there are any uploads that haven't been processed yet
+    // (not in activeUploads and not finished/failed)
+    const processedCount = lastUpload.value + 1;
+    return allUploads.value.length > processedCount;
+  };
+  
+  const hasUnfinishedUploads = () => {
+    // Check if there are any uploads that are still active or pending
+    return hasActiveUploads() || hasPendingUploads();
+  };
 
   const isActiveUploadsOnLimit = () => activeUploads.value.size < UPLOADS_LIMIT;
 
   const processUploads = async () => {
-    if (!hasActiveUploads() && !hasPendingUploads()) {
+    // Check if all uploads are finished (either completed or failed)
+    if (!hasUnfinishedUploads()) {
       const fileStore = useFileStore();
       window.removeEventListener("beforeunload", beforeUnload);
-      buttons.success("upload");
-      reset();
-      fileStore.reload = true;
+      
+      // Check if there are any failed uploads
+      const hasFailedUploads = allUploads.value.some((u) => u.failed);
+      
+      if (hasFailedUploads) {
+        // Show error state instead of success
+        buttons.done("upload");
+        // Don't reset immediately, let user see the error
+        // Reset after a delay to allow error message to be visible
+        setTimeout(() => {
+          reset();
+          fileStore.reload = true;
+        }, 3000);
+      } else {
+        // All uploads succeeded
+        buttons.success("upload");
+        reset();
+        fileStore.reload = true;
+      }
+      return;
     }
 
     if (isActiveUploadsOnLimit() && hasPendingUploads()) {
@@ -109,20 +136,59 @@ export const useUploadStore = defineStore("upload", () => {
       }
 
       const upload = nextUpload();
+      let uploadSucceeded = false;
 
-      if (upload.type === "dir") {
-        await api.post(upload.path).catch($showError);
-      } else {
-        const onUpload = (event: ProgressEvent) => {
-          upload.rawProgress.sentBytes = event.loaded;
-        };
+      try {
+        if (upload.type === "dir") {
+          await api.post(upload.path);
+          uploadSucceeded = true;
+        } else {
+          const onUpload = (event: ProgressEvent) => {
+            upload.rawProgress.sentBytes = event.loaded;
+          };
 
-        await api
-          .post(upload.path, upload.file!, upload.overwrite, onUpload)
-          .catch((err) => err.message !== "Upload aborted" && $showError(err));
+          await api.post(upload.path, upload.file!, upload.overwrite, onUpload);
+          uploadSucceeded = true;
+        }
+      } catch (err: any) {
+        // Mark upload as failed
+        upload.failed = true;
+        upload.error = err?.message || "Upload failed";
+        
+        // Show error to user (unless it's an abort)
+        if (err?.message !== "Upload aborted") {
+          // Extract error message from different error types
+          let errorMessage = "Upload failed";
+          if (err instanceof Error) {
+            errorMessage = err.message;
+          } else if (typeof err === "string") {
+            errorMessage = err;
+          } else if (err?.message) {
+            errorMessage = err.message;
+          } else if (err?.toString) {
+            errorMessage = err.toString();
+          }
+          
+          // Show detailed error message with file name
+          $showError(new Error(`上传失败: "${upload.name}"\n${errorMessage}`));
+        }
+        
+        // Remove from active uploads but keep in allUploads for tracking
+        activeUploads.value.delete(upload);
+        
+        // Update sentBytes to reflect the actual bytes sent before failure
+        sentBytes.value += upload.rawProgress.sentBytes - upload.sentBytes;
+        upload.sentBytes = upload.rawProgress.sentBytes;
+        
+        // Continue processing other uploads
+        processUploads();
+        return;
       }
 
-      finishUpload(upload);
+      // Only finish upload if it succeeded
+      if (uploadSucceeded) {
+        finishUpload(upload);
+      }
     }
   };
 
