@@ -32,11 +32,30 @@ async function calculateFileHashWithCryptoJS(
   file: Blob | File,
   algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512'
 ): Promise<string> {
+  const fileName = file instanceof File ? file.name : 'Blob';
+  const fileSize = file.size;
+  const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
+  
+  // CRITICAL: For large files (>100MB), always use streaming approach
+  // arrayBuffer() may not reliably read the entire file for large files, leading to incorrect hash
+  // This is especially important for files in the 500-700MB range where arrayBuffer() might succeed
+  // but read incomplete or incorrect data
+  if (fileSize > 100 * 1024 * 1024) {
+    return await calculateFileHashWithCryptoJSStreaming(file, algorithm);
+  }
+  
   try {
     // IMPORTANT: Don't create a slice here - file should already be a fresh slice
     // Creating a slice here might cause issues if the file has already been sliced
     // Just read the file directly
     const buffer = await file.arrayBuffer();
+    
+    // Verify buffer size matches file size
+    if (buffer.byteLength !== fileSize) {
+      const errorMsg = `Buffer size mismatch: expected ${fileSize} bytes, but got ${buffer.byteLength} bytes`;
+      console.error(`[Hash Calculation] ERROR: ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
     
     const bytes = new Uint8Array(buffer);
     
@@ -64,11 +83,24 @@ async function calculateFileHashWithCryptoJS(
         throw new Error(`Unsupported algorithm: ${algorithm}`);
     }
     
+    const hashHex = hash.toString(CryptoJS.enc.Hex).toLowerCase();
+    
     // Ensure lowercase hex output (consistent with backend)
-    return hash.toString(CryptoJS.enc.Hex).toLowerCase();
+    return hashHex;
   } catch (error: any) {
+    console.error(`[Hash Calculation] ERROR during crypto-js hash calculation:`, {
+      fileName,
+      fileSize,
+      fileSizeMB,
+      algorithm,
+      error: error?.message || String(error),
+      errorName: error?.name,
+      stack: error?.stack
+    });
+    
     // If arrayBuffer fails (memory issue), try streaming approach
-    if (error?.name === 'QuotaExceededError' || error?.name === 'RangeError' || file.size > 100 * 1024 * 1024) {
+    if (error?.name === 'QuotaExceededError' || error?.name === 'RangeError') {
+      console.log(`[Hash Calculation] Falling back to streaming approach due to: ${error?.name}`);
       return await calculateFileHashWithCryptoJSStreaming(file, algorithm);
     }
     throw error;
@@ -90,6 +122,10 @@ async function calculateFileHashWithCryptoJSStreaming(
 ): Promise<string> {
   // IMPORTANT: Don't create a slice here - file should already be a fresh slice
   // Just read the file directly
+  const fileName = file instanceof File ? file.name : 'Blob';
+  const fileSize = file.size;
+  const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
+  
   const stream = file.stream();
   const reader = stream.getReader();
   
@@ -114,6 +150,14 @@ async function calculateFileHashWithCryptoJSStreaming(
   }
   
   try {
+    // Track total bytes read to verify we read the entire file
+    // This is critical to detect if any chunks were lost or if the stream was incomplete
+    let totalBytesRead = 0;
+    const expectedSize = file.size;
+    let chunkCount = 0;
+    let firstChunkBytes: number[] | null = null;
+    let lastChunkBytes: number[] | null = null;
+    
     // Read file in chunks and update hash incrementally
     // This avoids loading the entire file into memory
     while (true) {
@@ -121,17 +165,67 @@ async function calculateFileHashWithCryptoJSStreaming(
       if (done) break;
       
       if (value && value.length > 0) {
+        chunkCount++;
+        
+        // Record first chunk bytes for debugging
+        if (chunkCount === 1 && value.length >= 16) {
+          firstChunkBytes = Array.from(value.slice(0, 16));
+        }
+        
+        // Record last chunk bytes for debugging
+        if (value.length >= 16) {
+          lastChunkBytes = Array.from(value.slice(-16));
+        }
+        
         // Convert chunk to WordArray and update hash incrementally
         const wordArray = CryptoJS.lib.WordArray.create(value);
         hasher.update(wordArray);
+        totalBytesRead += value.length;
+        
+        // Log progress for large files (every 100MB)
+        if (chunkCount % 100 === 0) {
+          const progressMB = (totalBytesRead / 1024 / 1024).toFixed(2);
+          console.log(`[Hash Calculation] Progress: ${chunkCount} chunks, ${progressMB}MB read`);
+        }
       }
+    }
+    
+    // CRITICAL: Verify that we read the entire file
+    // If the bytes read don't match the file size, the hash will be incorrect
+    // This can happen if:
+    // 1. The file was modified during reading
+    // 2. The stream was incomplete or truncated
+    // 3. There was a race condition with file access
+    if (totalBytesRead !== expectedSize) {
+      const errorMsg = `File hash calculation incomplete: expected ${expectedSize} bytes, but only read ${totalBytesRead} bytes. ` +
+        `This indicates the file data was not fully read, which would result in an incorrect hash.`;
+      console.error(`[Hash Calculation] ERROR: ${errorMsg}`);
+      throw new Error(errorMsg);
     }
     
     // Finalize hash calculation
     const hash = hasher.finalize();
+    const hashHex = hash.toString(CryptoJS.enc.Hex).toLowerCase();
+    
+    // Log first and last bytes for debugging (useful when hash mismatch occurs)
+    if (firstChunkBytes && lastChunkBytes) {
+      const firstBytesHex = firstChunkBytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
+      const lastBytesHex = lastChunkBytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
+      console.log(`[Hash Calculation] Streaming complete: ${chunkCount} chunks, ${fileSizeMB}MB, first16bytes=${firstBytesHex.substring(0, 32)}..., last16bytes=...${lastBytesHex.substring(lastBytesHex.length - 32)}`);
+    }
     
     // Ensure lowercase hex output (consistent with backend)
-    return hash.toString(CryptoJS.enc.Hex).toLowerCase();
+    return hashHex;
+  } catch (error: any) {
+    console.error(`[Hash Calculation] ERROR during streaming hash calculation:`, {
+      fileName,
+      fileSize,
+      fileSizeMB,
+      algorithm,
+      error: error?.message || String(error),
+      stack: error?.stack
+    });
+    throw error;
   } finally {
     reader.releaseLock();
   }
@@ -225,58 +319,6 @@ export async function calculateFileHash(
   }
 }
 
-/**
- * Calculate file hash using streaming for large files (DEPRECATED)
- * 
- * NOTE: This function is kept for backward compatibility but is no longer used.
- * Web Crypto API requires loading the entire file into memory, which causes issues with large files.
- * For large files, we now use crypto-js with incremental hashing instead.
- * 
- * This method reads the file in chunks but still needs to combine all chunks into memory
- * before calculating the hash, which defeats the purpose for very large files.
- */
-async function calculateFileHashStreaming(
-  file: Blob | File,
-  algorithm: AlgorithmIdentifier
-): Promise<string> {
-  // IMPORTANT: Don't create a slice here - file should already be a fresh slice
-  // Just read the file directly
-  const stream = file.stream();
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  
-  try {
-    // Read file in chunks
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      
-      if (value) {
-        chunks.push(value);
-      }
-    }
-    
-    // Combine all chunks into a single buffer
-    // Note: Web Crypto API requires the entire data at once for digest calculation
-    // This still loads the entire file into memory, which is problematic for very large files
-    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-    const combined = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      combined.set(chunk, offset);
-      offset += chunk.length;
-    }
-    
-    // Calculate hash
-    const hashBuffer = await crypto.subtle.digest(algorithm, combined);
-    return arrayBufferToHex(hashBuffer);
-  } catch (error) {
-    // If streaming also fails, provide a helpful error message
-    throw new Error(`Failed to calculate file hash: ${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    reader.releaseLock();
-  }
-}
 
 /**
  * Convert ArrayBuffer to hex string
@@ -296,13 +338,45 @@ export async function calculateFileHashSafe(
   file: Blob | File,
   algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512' = 'sha256'
 ): Promise<string | null> {
+  const fileName = file instanceof File ? file.name : 'Blob';
+  const fileSize = file.size;
+  const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
+  const fileType = file instanceof File ? 'File' : 'Blob';
+  
   try {
     // Always create a fresh slice to ensure we're reading the complete, unmodified file
     // This is critical because the file might have been partially read or modified
     const fileSlice = file.slice(0, file.size);
+    
+    // CRITICAL: Verify that the slice has the correct size
+    // If the slice size doesn't match the original file size, it indicates a problem
+    // This can happen if:
+    // 1. The file was modified during slice creation
+    // 2. The Blob.slice() implementation has a bug
+    // 3. There's a race condition with file access
+    if (fileSlice.size !== file.size) {
+      const errorMsg = `File slice size mismatch: expected ${file.size} bytes, but slice has ${fileSlice.size} bytes. ` +
+        `This indicates the file data may be incomplete or corrupted.`;
+      console.error(`[Hash Calculation] ERROR: ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
+    
     const hash = await calculateFileHash(fileSlice, algorithm);
+    
+    console.log(`[Hash Calculation] Success: fileName=${fileName}, size=${fileSizeMB}MB, hash=${hash}`);
+    
     return hash;
   } catch (error: any) {
+    // Log error for debugging but don't expose to user
+    console.error('[Hash Calculation] ERROR:', {
+      fileName,
+      fileType,
+      fileSize,
+      fileSizeMB,
+      error: error?.message || String(error),
+      algorithm,
+      stack: error?.stack
+    });
     // Silently return null on error - caller should handle the error appropriately
     return null;
   }

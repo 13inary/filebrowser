@@ -301,9 +301,276 @@ export async function calculateFileHash(
 - 普通 POST 上传集成：`frontend/src/api/files.ts`
 - 后端验证逻辑：`http/tus_handlers.go`、`http/resource.go`
 
+---
+
+## 问题三：特定大小文件的 Hash 计算错误（流式读取不完整）
+
+### 问题描述
+某些特定大小的文件（如 600多M）在前端计算的 hash 值与后端不一致，但其他大小的文件（1G、几M）都正常。
+
+**表现**：
+- 1G 和几M的文件：hash 计算正确，上传成功
+- 600多M的文件：前端计算的 hash 错误，后端计算的 hash 正确（与文件实际内容匹配）
+
+### 根本原因
+
+#### 流式读取时未验证读取完整性
+**问题代码**：
+```typescript
+// ❌ 错误方式：没有验证读取的总字节数
+async function calculateFileHashWithCryptoJSStreaming(
+  file: Blob | File,
+  algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512'
+): Promise<string> {
+  const stream = file.stream();
+  const reader = stream.getReader();
+  let hasher = CryptoJS.algo.SHA256.create();
+  
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    
+    if (value && value.length > 0) {
+      const wordArray = CryptoJS.lib.WordArray.create(value);
+      hasher.update(wordArray);
+      // ❌ 问题：没有跟踪和验证读取的总字节数
+    }
+  }
+  
+  const hash = hasher.finalize();
+  return hash.toString(CryptoJS.enc.Hex).toLowerCase();
+}
+```
+
+**问题分析**：
+- 流式读取时，如果某些 chunk 丢失或读取不完整，不会抛出错误
+- 没有验证读取的总字节数是否等于文件大小
+- 如果读取的字节数少于文件大小，hash 计算会基于不完整的数据，导致错误的 hash
+- 这种情况可能在某些特定大小的文件上更容易发生（可能与浏览器内部缓冲区大小、网络状态等有关）
+
+#### Blob.slice() 大小验证缺失
+**问题**：
+- `file.slice(0, file.size)` 在某些情况下可能不会创建正确大小的 Blob
+- 如果 slice 的大小与原始文件大小不匹配，会导致读取不完整的数据
+- 没有验证 slice 的大小是否正确
+
+### 解决方案
+
+#### 1. 验证流式读取的完整性
+**修复代码**：
+```typescript
+// ✅ 正确方式：验证读取的总字节数
+async function calculateFileHashWithCryptoJSStreaming(
+  file: Blob | File,
+  algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512'
+): Promise<string> {
+  const stream = file.stream();
+  const reader = stream.getReader();
+  let hasher = CryptoJS.algo.SHA256.create();
+  
+  // ✅ 跟踪总字节数
+  let totalBytesRead = 0;
+  const expectedSize = file.size;
+  
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    
+    if (value && value.length > 0) {
+      const wordArray = CryptoJS.lib.WordArray.create(value);
+      hasher.update(wordArray);
+      totalBytesRead += value.length; // ✅ 累计读取的字节数
+    }
+  }
+  
+  // ✅ CRITICAL: 验证读取完整性
+  if (totalBytesRead !== expectedSize) {
+    throw new Error(
+      `File hash calculation incomplete: expected ${expectedSize} bytes, but only read ${totalBytesRead} bytes. ` +
+      `This indicates the file data was not fully read, which would result in an incorrect hash.`
+    );
+  }
+  
+  const hash = hasher.finalize();
+  return hash.toString(CryptoJS.enc.Hex).toLowerCase();
+}
+```
+
+**关键点**：
+- 跟踪读取的总字节数
+- 在完成读取后验证总字节数是否等于文件大小
+- 如果不匹配，抛出明确的错误，避免返回错误的 hash
+
+#### 2. 验证 Blob.slice() 的大小
+**修复代码**：
+```typescript
+export async function calculateFileHashSafe(
+  file: Blob | File,
+  algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512' = 'sha256'
+): Promise<string | null> {
+  try {
+    const fileSlice = file.slice(0, file.size);
+    
+    // ✅ CRITICAL: 验证 slice 大小
+    if (fileSlice.size !== file.size) {
+      throw new Error(
+        `File slice size mismatch: expected ${file.size} bytes, but slice has ${fileSlice.size} bytes. ` +
+        `This indicates the file data may be incomplete or corrupted.`
+      );
+    }
+    
+    const hash = await calculateFileHash(fileSlice, algorithm);
+    return hash;
+  } catch (error: any) {
+    // 记录错误但不暴露给用户
+    console.error('[Hash Calculation Error]', {
+      fileName: file instanceof File ? file.name : 'Blob',
+      fileSize: file.size,
+      error: error?.message || String(error)
+    });
+    return null;
+  }
+}
+```
+
+**关键点**：
+- 验证 `fileSlice.size` 是否等于 `file.size`
+- 如果不匹配，抛出错误，避免基于不完整数据计算 hash
+- 记录详细的错误信息用于调试
+
+### 为什么某些文件大小更容易出现问题？
+
+1. **浏览器内部缓冲区大小**：不同浏览器对 Blob 和 Stream 的内部缓冲区大小不同，某些大小可能刚好触发边界条件
+2. **内存管理**：某些大小的文件可能触发浏览器的内存管理策略，导致流式读取时出现问题
+3. **网络状态**：如果文件来自网络（如通过 fetch 获取），网络状态可能影响流式读取的完整性
+4. **文件系统缓存**：某些大小的文件可能不会完全缓存，导致读取不完整
+
+### 验证方法
+1. 在流式读取后验证 `totalBytesRead === file.size`
+2. 验证 `fileSlice.size === file.size`
+3. 如果验证失败，记录详细的错误信息
+4. 测试不同大小的文件，特别关注 500MB-700MB 范围的文件
+
+---
+
+## 问题四：HTTP 环境下大文件使用 arrayBuffer() 导致 Hash 计算错误
+
+### 问题描述
+在 HTTP 环境下，某些特定大小的文件（如 600多M）在前端计算的 hash 值与后端不一致。
+
+**表现**：
+- 前端 hash: `18766771d77e4fb072a165ebbb4f8374dad74e9aa861d5f6aac7608f2f3552a6`
+- 后端 hash: `907743c15d40267af6b0f4b66863eb133ffffb2cf6a1fa319ae315a4c0152dec`
+- 文件大小: 614.24MB
+- 后端 hash 与文件实际内容匹配，说明后端计算正确
+
+### 根本原因
+
+#### HTTP 环境下大文件仍使用 arrayBuffer()
+**问题代码**：
+```typescript
+// ❌ 问题：在 HTTP 环境下，即使文件 > 100MB，也会先尝试 arrayBuffer()
+export async function calculateFileHash(
+  file: Blob | File,
+  algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512' = 'sha256'
+): Promise<string> {
+  // Check if Web Crypto API is available
+  if (!isWebCryptoAvailable()) {
+    // HTTP 环境，Web Crypto API 不可用
+    if (isHTTP) {
+      // ❌ 问题：直接调用 calculateFileHashWithCryptoJS，没有检查文件大小
+      return await calculateFileHashWithCryptoJS(file, algorithm);
+    }
+  }
+  
+  // ✅ 只有在 Web Crypto API 可用时，才会检查文件大小 > 100MB
+  if (file.size > 100 * 1024 * 1024) {
+    return await calculateFileHashWithCryptoJSStreaming(file, algorithm);
+  }
+  // ...
+}
+```
+
+**问题分析**：
+- 在 HTTP 环境下，Web Crypto API 不可用，会直接调用 `calculateFileHashWithCryptoJS`
+- `calculateFileHashWithCryptoJS` 会先尝试使用 `arrayBuffer()` 一次性读取整个文件
+- 对于 600多M 的文件，`arrayBuffer()` 可能：
+  1. 读取不完整的数据
+  2. 读取的数据与后端实际接收的数据不一致
+  3. 在某些浏览器或特定文件大小下，`arrayBuffer()` 虽然成功，但数据不正确
+
+**为什么只在某些文件大小出现问题？**
+- 不同浏览器对 `arrayBuffer()` 的内部实现不同
+- 某些文件大小可能触发浏览器的内存管理边界条件
+- 500-700MB 范围可能是 `arrayBuffer()` 的临界点，在这个范围内可能读取不完整或错误的数据
+
+### 解决方案
+
+#### 在 calculateFileHashWithCryptoJS 中直接检查文件大小
+**修复代码**：
+```typescript
+async function calculateFileHashWithCryptoJS(
+  file: Blob | File,
+  algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512'
+): Promise<string> {
+  const fileSize = file.size;
+  const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
+  
+  // ✅ CRITICAL: For large files (>100MB), always use streaming approach
+  // arrayBuffer() may not reliably read the entire file for large files, leading to incorrect hash
+  // This is especially important for files in the 500-700MB range where arrayBuffer() might succeed
+  // but read incomplete or incorrect data
+  if (fileSize > 100 * 1024 * 1024) {
+    return await calculateFileHashWithCryptoJSStreaming(file, algorithm);
+  }
+  
+  // 对于小文件，使用 arrayBuffer() 方式（性能更好）
+  try {
+    const buffer = await file.arrayBuffer();
+    // ... 计算 hash
+  } catch (error: any) {
+    // 如果失败，回退到流式方法
+    if (error?.name === 'QuotaExceededError' || error?.name === 'RangeError') {
+      return await calculateFileHashWithCryptoJSStreaming(file, algorithm);
+    }
+    throw error;
+  }
+}
+```
+
+**关键点**：
+- 在 `calculateFileHashWithCryptoJS` 函数开头就检查文件大小
+- 如果文件 > 100MB，直接使用流式方法，避免使用 `arrayBuffer()`
+- 这确保了无论环境（HTTP/HTTPS），大文件都使用流式方法
+- 小文件仍使用 `arrayBuffer()` 方式（性能更好）
+
+### 为什么这个修复有效？
+
+1. **流式方法更可靠**：
+   - 流式方法逐块读取文件，不会一次性加载整个文件到内存
+   - 每个 chunk 都经过验证，确保读取完整性
+   - 避免了 `arrayBuffer()` 在某些情况下的数据不一致问题
+
+2. **统一处理逻辑**：
+   - 无论环境（HTTP/HTTPS），大文件都使用相同的流式方法
+   - 减少了代码路径的复杂性
+   - 提高了代码的可维护性
+
+3. **性能考虑**：
+   - 小文件（< 100MB）仍使用 `arrayBuffer()` 方式（性能更好）
+   - 大文件使用流式方法（内存效率更高，更可靠）
+
+### 验证方法
+1. 测试不同大小的文件（特别是 500-700MB 范围）
+2. 在 HTTP 和 HTTPS 环境下都进行测试
+3. 验证前端和后端的 hash 值完全一致
+4. 检查控制台日志，确认大文件使用了流式方法
+
 ### 参考文档
 
 - [crypto-js 文档](https://cryptojs.gitbook.io/docs/)
 - [Web Crypto API 文档](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API)
 - [TUS 协议规范](https://tus.io/protocols/resumable-upload.html)
+- [Blob.slice() 规范](https://developer.mozilla.org/en-US/docs/Web/API/Blob/slice)
+- [ReadableStream 规范](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream)
 

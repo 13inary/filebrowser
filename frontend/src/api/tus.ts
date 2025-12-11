@@ -33,19 +33,25 @@ export async function upload(
   // IMPORTANT: Calculate hash BEFORE creating tus.Upload to ensure file hasn't been read yet
   let checksumHeader = "";
   if (content instanceof Blob) {
+    const fileName = content instanceof File ? content.name : 'file';
+    const fileSize = content.size;
+    const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
+    
     // Pass the original content to calculateFileHashSafe, which will handle slicing internally
     // Don't create a slice here to avoid double-slicing issues
     const hash = await calculateFileHashSafe(content, "sha256");
     if (!hash) {
       // Hash calculation failed - reject TUS upload
       // This will cause the system to fall back to regular POST upload
-      const fileName = content instanceof File ? content.name : 'file';
-      const fileSizeMB = (content.size / 1024 / 1024).toFixed(2);
+      console.error(`[TUS Upload] Hash calculation failed: fileName=${fileName}, size=${fileSizeMB}MB`);
       return Promise.reject(new Error(
         `无法计算文件哈希值（文件: ${fileName}, 大小: ${fileSizeMB}MB）。` +
         `请检查浏览器控制台获取详细信息，或尝试使用其他浏览器。`
       ));
     }
+    
+    console.log(`[TUS Upload] Hash calculated: fileName=${fileName}, size=${fileSizeMB}MB, hash=${hash}`);
+    
     checksumHeader = `sha256 ${hash}`;
   } else {
     // Non-Blob content cannot be hashed - reject TUS upload

@@ -153,9 +153,9 @@ async function postResources(
     checksumHeader = `sha256:${hash}`;
     
     if (
-      !["http:", "https:"].includes(window.location.protocol)
-    ) {
-      bufferContent = await new Response(content).arrayBuffer();
+    !["http:", "https:"].includes(window.location.protocol)
+  ) {
+    bufferContent = await new Response(content).arrayBuffer();
     }
   }
 

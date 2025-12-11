@@ -119,25 +119,25 @@ export const useUploadStore = defineStore("upload", () => {
         // Completion logic will be handled in finally block to ensure it runs
         // even when the last upload finishes during processing
         return;
+    }
+
+    if (isActiveUploadsOnLimit() && hasPendingUploads()) {
+      if (!hasActiveUploads()) {
+        // Update the state in a fixed time interval
+        progressInterval = window.setInterval(syncState, 1000);
       }
 
-      if (isActiveUploadsOnLimit() && hasPendingUploads()) {
-        if (!hasActiveUploads()) {
-          // Update the state in a fixed time interval
-          progressInterval = window.setInterval(syncState, 1000);
-        }
-
-        const upload = nextUpload();
+      const upload = nextUpload();
         let uploadSucceeded = false;
 
         try {
-          if (upload.type === "dir") {
+      if (upload.type === "dir") {
             await api.post(upload.path);
             uploadSucceeded = true;
-          } else {
-            const onUpload = (event: ProgressEvent) => {
-              upload.rawProgress.sentBytes = event.loaded;
-            };
+      } else {
+        const onUpload = (event: ProgressEvent) => {
+          upload.rawProgress.sentBytes = event.loaded;
+        };
 
             await api.post(upload.path, upload.file!, upload.overwrite, onUpload);
             uploadSucceeded = true;
@@ -163,8 +163,8 @@ export const useUploadStore = defineStore("upload", () => {
             
             // Show detailed error message with file name
             $showError(new Error(`上传失败: "${upload.name}"\n${errorMessage}`));
-          }
-          
+      }
+
           // Remove from active uploads but keep in allUploads for tracking
           activeUploads.value.delete(upload);
           
