@@ -76,7 +76,10 @@ async function calculateFileHashWithCryptoJS(
 }
 
 /**
- * Calculate file hash using crypto-js with streaming (for large files)
+ * Calculate file hash using crypto-js with incremental streaming (for large files)
+ * 
+ * This function uses incremental hashing to avoid loading the entire file into memory.
+ * It processes the file in chunks and updates the hash incrementally.
  * 
  * IMPORTANT: When using crypto-js, WordArray.create() must be called with Uint8Array directly.
  * This ensures the hash calculation matches the backend's hash calculation.
@@ -89,48 +92,43 @@ async function calculateFileHashWithCryptoJSStreaming(
   // Just read the file directly
   const stream = file.stream();
   const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
+  
+  // Initialize hash object for incremental updates
+  // Use any type to avoid TypeScript issues with crypto-js type definitions
+  let hasher: any;
+  switch (algorithm) {
+    case 'sha1':
+      hasher = CryptoJS.algo.SHA1.create();
+      break;
+    case 'sha256':
+      hasher = CryptoJS.algo.SHA256.create();
+      break;
+    case 'sha384':
+      hasher = CryptoJS.algo.SHA384.create();
+      break;
+    case 'sha512':
+      hasher = CryptoJS.algo.SHA512.create();
+      break;
+    default:
+      throw new Error(`Unsupported algorithm: ${algorithm}`);
+  }
   
   try {
-    // Read file in chunks
+    // Read file in chunks and update hash incrementally
+    // This avoids loading the entire file into memory
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       
-      if (value) {
-        chunks.push(value);
+      if (value && value.length > 0) {
+        // Convert chunk to WordArray and update hash incrementally
+        const wordArray = CryptoJS.lib.WordArray.create(value);
+        hasher.update(wordArray);
       }
     }
     
-    // Combine all chunks
-    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-    const combined = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      combined.set(chunk, offset);
-      offset += chunk.length;
-    }
-    
-    // Calculate hash using crypto-js
-    // Create WordArray from the bytes directly using the proper method
-    const wordArray = CryptoJS.lib.WordArray.create(combined);
-    let hash: CryptoJS.lib.WordArray;
-    switch (algorithm) {
-      case 'sha1':
-        hash = CryptoJS.SHA1(wordArray);
-        break;
-      case 'sha256':
-        hash = CryptoJS.SHA256(wordArray);
-        break;
-      case 'sha384':
-        hash = CryptoJS.SHA384(wordArray);
-        break;
-      case 'sha512':
-        hash = CryptoJS.SHA512(wordArray);
-        break;
-      default:
-        throw new Error(`Unsupported algorithm: ${algorithm}`);
-    }
+    // Finalize hash calculation
+    const hash = hasher.finalize();
     
     // Ensure lowercase hex output (consistent with backend)
     return hash.toString(CryptoJS.enc.Hex).toLowerCase();
@@ -180,7 +178,19 @@ export async function calculateFileHash(
   // Input: 'sha512' -> Output: 'SHA-512'
   const cryptoAlgorithm = algorithm.toUpperCase().replace(/^SHA/, 'SHA-');
   
-  // Try arrayBuffer first (faster for most files)
+  // For large files (>100MB), use crypto-js with incremental hashing instead of Web Crypto API
+  // Web Crypto API requires loading the entire file into memory, which causes issues with large files
+  // crypto-js supports incremental hashing, which is more memory-efficient
+  if (file.size > 100 * 1024 * 1024) {
+    // Use crypto-js with incremental streaming for large files
+    try {
+      return await calculateFileHashWithCryptoJSStreaming(file, algorithm);
+    } catch (error: any) {
+      throw new Error(`Failed to calculate file hash for large file (${(file.size / 1024 / 1024).toFixed(2)}MB): ${error?.message || String(error)}`);
+    }
+  }
+  
+  // Try arrayBuffer first (faster for smaller files)
   try {
     // IMPORTANT: Don't create a slice here - file should already be a fresh slice
     // Creating a slice here might cause issues if the file has already been sliced
@@ -192,18 +202,18 @@ export async function calculateFileHash(
     );
     return arrayBufferToHex(hashBuffer);
   } catch (error: any) {
-    // If arrayBuffer fails (e.g., memory issue with large files), use streaming
+    // If arrayBuffer fails (e.g., memory issue), fallback to crypto-js with incremental hashing
     // Check if it's a memory-related error
     const isMemoryError = 
       error?.name === 'QuotaExceededError' ||
       error?.name === 'RangeError' ||
       error?.message?.includes('memory') ||
-      error?.message?.includes('quota') ||
-      file.size > 100 * 1024 * 1024; // > 100MB
+      error?.message?.includes('quota');
     
     if (isMemoryError) {
       try {
-        return await calculateFileHashStreaming(file, cryptoAlgorithm as AlgorithmIdentifier);
+        // Use crypto-js with incremental streaming as fallback
+        return await calculateFileHashWithCryptoJSStreaming(file, algorithm);
       } catch (streamError: any) {
         // If streaming also fails, provide detailed error
         throw new Error(`Failed to calculate file hash (file size: ${(file.size / 1024 / 1024).toFixed(2)}MB): ${streamError?.message || String(streamError)}`);
@@ -216,8 +226,14 @@ export async function calculateFileHash(
 }
 
 /**
- * Calculate file hash using streaming for large files
- * This method reads the file in chunks to avoid loading the entire file into memory at once
+ * Calculate file hash using streaming for large files (DEPRECATED)
+ * 
+ * NOTE: This function is kept for backward compatibility but is no longer used.
+ * Web Crypto API requires loading the entire file into memory, which causes issues with large files.
+ * For large files, we now use crypto-js with incremental hashing instead.
+ * 
+ * This method reads the file in chunks but still needs to combine all chunks into memory
+ * before calculating the hash, which defeats the purpose for very large files.
  */
 async function calculateFileHashStreaming(
   file: Blob | File,
@@ -242,6 +258,7 @@ async function calculateFileHashStreaming(
     
     // Combine all chunks into a single buffer
     // Note: Web Crypto API requires the entire data at once for digest calculation
+    // This still loads the entire file into memory, which is problematic for very large files
     const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
     const combined = new Uint8Array(totalLength);
     let offset = 0;
