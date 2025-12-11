@@ -327,26 +327,43 @@ onMounted(async () => {
 onBeforeUnmount(() => window.removeEventListener("keydown", key));
 
 // Specify methods
-const deleteFile = () => {
+const deleteFile = async () => {
+  // 保存当前文件的路径，确保即使列表更新也能删除正确的文件
+  const currentPath = route.path;
+  const currentName = name.value;
+
   layoutStore.showHover({
     prompt: "delete",
-    confirm: () => {
-      if (listing.value === null) {
-        return;
-      }
+    confirm: async () => {
+      try {
+        // 使用保存的路径调用 API 删除文件，而不是依赖列表索引
+        await api.remove(currentPath);
 
-      const index = listing.value.findIndex((item) => item.name == name.value);
-      listing.value.splice(index, 1);
+        if (listing.value === null) {
+          return;
+        }
 
-      if (hasNext.value) {
-        next();
-      } else if (!hasPrevious.value && !hasNext.value) {
-        const nearbyItem = listing.value[Math.max(0, index - 1)];
-        fileStore.preselect = nearbyItem?.path;
+        const index = listing.value.findIndex((item) => item.name == currentName);
+        if (index !== -1) {
+          listing.value.splice(index, 1);
+        }
 
-        close();
-      } else {
-        prev();
+        if (hasNext.value) {
+          next();
+        } else if (!hasPrevious.value && !hasNext.value) {
+          const nearbyItem = listing.value[Math.max(0, index - 1)];
+          fileStore.preselect = nearbyItem?.path;
+
+          close();
+        } else {
+          prev();
+        }
+      } catch (error) {
+        if (error instanceof Error) {
+          $showError(error);
+        } else {
+          $showError(String(error));
+        }
       }
     },
   });
