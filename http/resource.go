@@ -136,7 +136,7 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 			}
 		}
 
-		// Parse expected size and checksum from headers if provided
+		// Parse expected size and checksum from headers (required for integrity verification)
 		var expectedSize int64 = -1
 		if sizeStr := r.Header.Get("X-Expected-Size"); sizeStr != "" {
 			if size, parseErr := strconv.ParseInt(sizeStr, 10, 64); parseErr == nil {
@@ -146,23 +146,27 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 
 		expectedChecksums := parseChecksumHeaderForPost(r)
 
+		// Require checksum for file integrity verification
+		if len(expectedChecksums) == 0 {
+			return http.StatusBadRequest, fmt.Errorf("checksum header is required for file integrity verification")
+		}
+
+		// Require expected size for file integrity verification
+		if expectedSize < 0 {
+			return http.StatusBadRequest, fmt.Errorf("X-Expected-Size header is required for file integrity verification")
+		}
+
 		err = d.RunHook(func() error {
 			info, writeErr := writeFile(d.user.Fs, r.URL.Path, r.Body, d.settings.FileMode, d.settings.DirMode)
 			if writeErr != nil {
 				return writeErr
 			}
 
-			// Verify file integrity if expected size or checksum provided
-			if expectedSize >= 0 || len(expectedChecksums) > 0 {
-				verifySize := expectedSize
-				if verifySize < 0 {
-					verifySize = info.Size() // Use actual size if not provided
-				}
-				if verifyErr := verifyUploadIntegrityForPost(d.user.Fs, r.URL.Path, verifySize, expectedChecksums, d); verifyErr != nil {
-					// Remove file if integrity check fails
-					_ = d.user.Fs.RemoveAll(r.URL.Path)
-					return fmt.Errorf("upload integrity check failed: %w", verifyErr)
-				}
+			// Verify file integrity (checksum and size are required)
+			if verifyErr := verifyUploadIntegrityForPost(d.user.Fs, r.URL.Path, expectedSize, expectedChecksums, d); verifyErr != nil {
+				// Remove file if integrity check fails
+				_ = d.user.Fs.RemoveAll(r.URL.Path)
+				return fmt.Errorf("upload integrity check failed: %w", verifyErr)
 			}
 
 			etag := fmt.Sprintf(`"%x%x"`, info.ModTime().UnixNano(), info.Size())
@@ -341,21 +345,23 @@ func verifyUploadIntegrityForPost(fs afero.Fs, filePath string, expectedSize int
 		return fmt.Errorf("file size mismatch: expected %d, got %d", expectedSize, file.Size)
 	}
 
-	// Verify checksums if provided
-	if len(expectedChecksums) > 0 {
-		for algo, expectedHash := range expectedChecksums {
-			if err := file.Checksum(algo); err != nil {
-				return fmt.Errorf("failed to compute %s checksum: %w", algo, err)
-			}
+	// Verify checksums (required)
+	if len(expectedChecksums) == 0 {
+		return fmt.Errorf("checksum is required for file integrity verification")
+	}
 
-			actualHash, ok := file.Checksums[algo]
-			if !ok {
-				return fmt.Errorf("checksum algorithm %s not supported", algo)
-			}
+	for algo, expectedHash := range expectedChecksums {
+		if err := file.Checksum(algo); err != nil {
+			return fmt.Errorf("failed to compute %s checksum: %w", algo, err)
+		}
 
-			if actualHash != expectedHash {
-				return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHash, actualHash)
-			}
+		actualHash, ok := file.Checksums[algo]
+		if !ok {
+			return fmt.Errorf("checksum algorithm %s not supported", algo)
+		}
+
+		if actualHash != expectedHash {
+			return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHash, actualHash)
 		}
 	}
 

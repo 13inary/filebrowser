@@ -179,8 +179,13 @@ func tusPostHandler() handleFunc {
 			return http.StatusBadRequest, fmt.Errorf("invalid upload length: %w", err)
 		}
 
-		// Parse checksum from header if provided
+		// Parse checksum from header (required for integrity verification)
 		checksums := parseChecksumHeader(r)
+
+		// Require checksum for file integrity verification
+		if len(checksums) == 0 {
+			return http.StatusBadRequest, fmt.Errorf("Upload-Checksum header is required for file integrity verification")
+		}
 
 		// Enables the user to utilize the PATCH endpoint for uploading file data
 		registerUpload(file.RealPath(), uploadLength, checksums)
@@ -304,16 +309,27 @@ func tusPatchHandler() handleFunc {
 		w.Header().Set("Upload-Offset", strconv.FormatInt(newOffset, 10))
 
 		if newOffset >= uploadLength {
-			// Verify file integrity before completing upload
+			// Verify file integrity before completing upload (required)
 			uploadInfo, err := getActiveUploadInfo(file.RealPath())
-			if err == nil {
-				// Use r.URL.Path (relative path) instead of file.RealPath() (absolute path)
-				// because NewFileInfo expects a path relative to the filesystem root
-				if verifyErr := verifyUploadIntegrity(d.user.Fs, r.URL.Path, uploadInfo.Length, uploadInfo.Checksum, d); verifyErr != nil {
-					completeUpload(file.RealPath())
-					_ = d.user.Fs.RemoveAll(r.URL.Path)
-					return http.StatusBadRequest, fmt.Errorf("upload integrity check failed: %w", verifyErr)
-				}
+			if err != nil {
+				completeUpload(file.RealPath())
+				_ = d.user.Fs.RemoveAll(r.URL.Path)
+				return http.StatusBadRequest, fmt.Errorf("failed to get upload info: %w", err)
+			}
+
+			// Require checksum for file integrity verification
+			if len(uploadInfo.Checksum) == 0 {
+				completeUpload(file.RealPath())
+				_ = d.user.Fs.RemoveAll(r.URL.Path)
+				return http.StatusBadRequest, fmt.Errorf("checksum is required for file integrity verification")
+			}
+
+			// Use r.URL.Path (relative path) instead of file.RealPath() (absolute path)
+			// because NewFileInfo expects a path relative to the filesystem root
+			if verifyErr := verifyUploadIntegrity(d.user.Fs, r.URL.Path, uploadInfo.Length, uploadInfo.Checksum, d); verifyErr != nil {
+				completeUpload(file.RealPath())
+				_ = d.user.Fs.RemoveAll(r.URL.Path)
+				return http.StatusBadRequest, fmt.Errorf("upload integrity check failed: %w", verifyErr)
 			}
 
 			completeUpload(file.RealPath())
@@ -394,21 +410,23 @@ func verifyUploadIntegrity(fs afero.Fs, filePath string, expectedSize int64, exp
 		return fmt.Errorf("file size mismatch: expected %d, got %d", expectedSize, file.Size)
 	}
 
-	// Verify checksums if provided
-	if len(expectedChecksums) > 0 {
-		for algo, expectedHash := range expectedChecksums {
-			if err := file.Checksum(algo); err != nil {
-				return fmt.Errorf("failed to compute %s checksum: %w", algo, err)
-			}
+	// Verify checksums (required)
+	if len(expectedChecksums) == 0 {
+		return fmt.Errorf("checksum is required for file integrity verification")
+	}
 
-			actualHash, ok := file.Checksums[algo]
-			if !ok {
-				return fmt.Errorf("checksum algorithm %s not supported", algo)
-			}
+	for algo, expectedHash := range expectedChecksums {
+		if err := file.Checksum(algo); err != nil {
+			return fmt.Errorf("failed to compute %s checksum: %w", algo, err)
+		}
 
-			if actualHash != expectedHash {
-				return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHash, actualHash)
-			}
+		actualHash, ok := file.Checksums[algo]
+		if !ok {
+			return fmt.Errorf("checksum algorithm %s not supported", algo)
+		}
+
+		if actualHash != expectedHash {
+			return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHash, actualHash)
 		}
 	}
 
