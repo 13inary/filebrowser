@@ -457,17 +457,16 @@ func verifyUploadIntegrity(fs afero.Fs, filePath string, expectedSize int64, exp
 			return fmt.Errorf("checksum algorithm %s not supported", algo)
 		}
 
-		// Normalize hashes: convert to lowercase and remove any whitespace
-		// This ensures consistent comparison regardless of case or whitespace differences
-		expectedHashNormalized := strings.ToLower(strings.TrimSpace(expectedHash))
-		actualHashNormalized := strings.ToLower(strings.TrimSpace(actualHash))
+		// Remove any whitespace for comparison
+		expectedHashTrimmed := strings.TrimSpace(expectedHash)
+		actualHashTrimmed := strings.TrimSpace(actualHash)
 
 		// Log hash verification result with timestamp
-		if actualHashNormalized == expectedHashNormalized {
-			log.Printf("[Upload Integrity] File hash verification passed: path=%s, size=%d, algorithm=%s, hash=%s", filePath, file.Size, algo, actualHashNormalized)
+		if actualHashTrimmed == expectedHashTrimmed {
+			log.Printf("[Upload Integrity] File hash verification passed: path=%s, size=%d, algorithm=%s, hash=%s", filePath, file.Size, algo, actualHashTrimmed)
 		} else {
-			log.Printf("[Upload Integrity] File hash verification failed: path=%s, size=%d, algorithm=%s, expected=%s, actual=%s", filePath, file.Size, algo, expectedHashNormalized, actualHashNormalized)
-			return fmt.Errorf("%s checksum mismatch: expected %s (normalized: %s), got %s (normalized: %s)", algo, expectedHash, expectedHashNormalized, actualHash, actualHashNormalized)
+			log.Printf("[Upload Integrity] File hash verification failed: path=%s, size=%d, algorithm=%s, expected=%s, actual=%s", filePath, file.Size, algo, expectedHashTrimmed, actualHashTrimmed)
+			return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHashTrimmed, actualHashTrimmed)
 		}
 	}
 
