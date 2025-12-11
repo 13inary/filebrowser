@@ -21,17 +21,30 @@ function isSecureContext(): boolean {
 
 /**
  * Calculate file hash using crypto-js as fallback (for HTTP environments)
+ * 
+ * IMPORTANT: When using crypto-js, WordArray.create() must be called with Uint8Array directly.
+ * Previous attempts using Array.from() or manual array creation resulted in incorrect hash values
+ * because crypto-js expects the raw byte array in a specific format.
+ * 
+ * This function is used when Web Crypto API is not available (e.g., HTTP environments).
  */
 async function calculateFileHashWithCryptoJS(
   file: Blob | File,
   algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512'
 ): Promise<string> {
   try {
+    // IMPORTANT: Don't create a slice here - file should already be a fresh slice
+    // Creating a slice here might cause issues if the file has already been sliced
+    // Just read the file directly
     const buffer = await file.arrayBuffer();
-    // Convert ArrayBuffer to WordArray for crypto-js
-    // crypto-js WordArray.create accepts an array of numbers (bytes)
+    
     const bytes = new Uint8Array(buffer);
-    const wordArray = CryptoJS.lib.WordArray.create(Array.from(bytes));
+    
+    // Convert ArrayBuffer to WordArray for crypto-js
+    // IMPORTANT: crypto-js WordArray.create can accept Uint8Array directly
+    // Previous attempts using Array.from() or manual array creation resulted in incorrect hash values
+    // Directly passing Uint8Array to WordArray.create is the correct approach
+    const wordArray = CryptoJS.lib.WordArray.create(bytes);
     
     let hash: CryptoJS.lib.WordArray;
     switch (algorithm) {
@@ -51,7 +64,8 @@ async function calculateFileHashWithCryptoJS(
         throw new Error(`Unsupported algorithm: ${algorithm}`);
     }
     
-    return hash.toString(CryptoJS.enc.Hex);
+    // Ensure lowercase hex output (consistent with backend)
+    return hash.toString(CryptoJS.enc.Hex).toLowerCase();
   } catch (error: any) {
     // If arrayBuffer fails (memory issue), try streaming approach
     if (error?.name === 'QuotaExceededError' || error?.name === 'RangeError' || file.size > 100 * 1024 * 1024) {
@@ -63,11 +77,16 @@ async function calculateFileHashWithCryptoJS(
 
 /**
  * Calculate file hash using crypto-js with streaming (for large files)
+ * 
+ * IMPORTANT: When using crypto-js, WordArray.create() must be called with Uint8Array directly.
+ * This ensures the hash calculation matches the backend's hash calculation.
  */
 async function calculateFileHashWithCryptoJSStreaming(
   file: Blob | File,
   algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512'
 ): Promise<string> {
+  // IMPORTANT: Don't create a slice here - file should already be a fresh slice
+  // Just read the file directly
   const stream = file.stream();
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -93,7 +112,8 @@ async function calculateFileHashWithCryptoJSStreaming(
     }
     
     // Calculate hash using crypto-js
-    const wordArray = CryptoJS.lib.WordArray.create(Array.from(combined));
+    // Create WordArray from the bytes directly using the proper method
+    const wordArray = CryptoJS.lib.WordArray.create(combined);
     let hash: CryptoJS.lib.WordArray;
     switch (algorithm) {
       case 'sha1':
@@ -112,7 +132,8 @@ async function calculateFileHashWithCryptoJSStreaming(
         throw new Error(`Unsupported algorithm: ${algorithm}`);
     }
     
-    return hash.toString(CryptoJS.enc.Hex);
+    // Ensure lowercase hex output (consistent with backend)
+    return hash.toString(CryptoJS.enc.Hex).toLowerCase();
   } finally {
     reader.releaseLock();
   }
@@ -134,8 +155,7 @@ export async function calculateFileHash(
   if (!isWebCryptoAvailable()) {
     const isHTTP = !isSecureContext();
     if (isHTTP) {
-      // Use crypto-js as fallback for HTTP environments
-      console.warn('Web Crypto API not available in HTTP context, using crypto-js fallback');
+      // Use crypto-js as fallback for HTTP environments (Web Crypto API requires secure context)
       try {
         return await calculateFileHashWithCryptoJS(file, algorithm);
       } catch (error: any) {
@@ -145,7 +165,6 @@ export async function calculateFileHash(
       }
     } else {
       // For HTTPS but Web Crypto API not available, try crypto-js as fallback
-      console.warn('Web Crypto API not available, using crypto-js fallback');
       try {
         return await calculateFileHashWithCryptoJS(file, algorithm);
       } catch (error: any) {
@@ -163,22 +182,16 @@ export async function calculateFileHash(
   
   // Try arrayBuffer first (faster for most files)
   try {
-    const buffer = await file.arrayBuffer();
+    // IMPORTANT: Don't create a slice here - file should already be a fresh slice
+    // Creating a slice here might cause issues if the file has already been sliced
+    // Just read the file directly
+    const fileBuffer = await file.arrayBuffer();
     const hashBuffer = await crypto.subtle.digest(
       cryptoAlgorithm as AlgorithmIdentifier,
-      buffer
+      fileBuffer
     );
     return arrayBufferToHex(hashBuffer);
   } catch (error: any) {
-    // Log detailed error information for debugging
-    console.error('Hash calculation error:', {
-      errorName: error?.name,
-      errorMessage: error?.message,
-      fileSize: file.size,
-      fileSizeMB: (file.size / 1024 / 1024).toFixed(2),
-      algorithm: cryptoAlgorithm,
-    });
-    
     // If arrayBuffer fails (e.g., memory issue with large files), use streaming
     // Check if it's a memory-related error
     const isMemoryError = 
@@ -189,7 +202,6 @@ export async function calculateFileHash(
       file.size > 100 * 1024 * 1024; // > 100MB
     
     if (isMemoryError) {
-      console.warn(`arrayBuffer failed for large file (${(file.size / 1024 / 1024).toFixed(2)}MB), using streaming:`, error);
       try {
         return await calculateFileHashStreaming(file, cryptoAlgorithm as AlgorithmIdentifier);
       } catch (streamError: any) {
@@ -211,6 +223,8 @@ async function calculateFileHashStreaming(
   file: Blob | File,
   algorithm: AlgorithmIdentifier
 ): Promise<string> {
+  // IMPORTANT: Don't create a slice here - file should already be a fresh slice
+  // Just read the file directly
   const stream = file.stream();
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -252,7 +266,8 @@ async function calculateFileHashStreaming(
  */
 function arrayBufferToHex(buffer: ArrayBuffer): string {
   const hashArray = Array.from(new Uint8Array(buffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  // Ensure lowercase hex output (consistent with backend)
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toLowerCase();
 }
 
 /**
@@ -265,21 +280,13 @@ export async function calculateFileHashSafe(
   algorithm: 'sha1' | 'sha256' | 'sha384' | 'sha512' = 'sha256'
 ): Promise<string | null> {
   try {
-    return await calculateFileHash(file, algorithm);
+    // Always create a fresh slice to ensure we're reading the complete, unmodified file
+    // This is critical because the file might have been partially read or modified
+    const fileSlice = file.slice(0, file.size);
+    const hash = await calculateFileHash(fileSlice, algorithm);
+    return hash;
   } catch (error: any) {
-    // Log detailed error information
-    console.error(`Failed to calculate ${algorithm} hash for file:`, {
-      fileName: file instanceof File ? file.name : 'Blob',
-      fileSize: file.size,
-      fileSizeMB: (file.size / 1024 / 1024).toFixed(2),
-      errorName: error?.name,
-      errorMessage: error?.message,
-      stack: error?.stack,
-      webCryptoAvailable: isWebCryptoAvailable(),
-      isSecureContext: isSecureContext(),
-      protocol: window.location.protocol,
-      hostname: window.location.hostname,
-    });
+    // Silently return null on error - caller should handle the error appropriately
     return null;
   }
 }

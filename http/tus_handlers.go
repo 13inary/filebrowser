@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -332,6 +333,9 @@ func tusPatchHandler() handleFunc {
 			}
 		}
 
+		// Close the file before verification to ensure all data is flushed
+		openFile.Close()
+
 		newOffset := uploadOffset + bytesWritten
 		w.Header().Set("Upload-Offset", strconv.FormatInt(newOffset, 10))
 
@@ -452,8 +456,13 @@ func verifyUploadIntegrity(fs afero.Fs, filePath string, expectedSize int64, exp
 			return fmt.Errorf("checksum algorithm %s not supported", algo)
 		}
 
-		if actualHash != expectedHash {
-			return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHash, actualHash)
+		// Normalize hashes: convert to lowercase and remove any whitespace
+		// This ensures consistent comparison regardless of case or whitespace differences
+		expectedHashNormalized := strings.ToLower(strings.TrimSpace(expectedHash))
+		actualHashNormalized := strings.ToLower(strings.TrimSpace(actualHash))
+
+		if actualHashNormalized != expectedHashNormalized {
+			return fmt.Errorf("%s checksum mismatch: expected %s (normalized: %s), got %s (normalized: %s)", algo, expectedHash, expectedHashNormalized, actualHash, actualHashNormalized)
 		}
 	}
 
@@ -482,8 +491,8 @@ func parseChecksumHeader(r *http.Request) map[string]string {
 	}
 
 	if spaceIdx > 0 && spaceIdx < len(checksumHeader)-1 {
-		algo := checksumHeader[:spaceIdx]
-		hash := checksumHeader[spaceIdx+1:]
+		algo := strings.ToLower(strings.TrimSpace(checksumHeader[:spaceIdx]))
+		hash := strings.TrimSpace(checksumHeader[spaceIdx+1:])
 		// Validate algorithm
 		if algo == "md5" || algo == "sha1" || algo == "sha256" || algo == "sha512" {
 			checksums[algo] = hash

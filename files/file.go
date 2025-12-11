@@ -196,6 +196,9 @@ func (i *FileInfo) Checksum(algo string) error {
 		return fberrors.ErrInvalidOption
 	}
 
+	// Calculate hash using io.Copy
+	// Note: We use io.Copy directly instead of io.TeeReader to avoid complexity
+	// The hash is calculated by copying all data from the reader to the hash writer
 	_, err = io.Copy(h, reader)
 	if err != nil {
 		return err

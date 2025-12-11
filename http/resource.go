@@ -18,11 +18,11 @@ import (
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/spf13/afero"
 
+	"github.com/filebrowser/filebrowser/v2/blacklist"
 	fberrors "github.com/filebrowser/filebrowser/v2/errors"
 	"github.com/filebrowser/filebrowser/v2/files"
 	"github.com/filebrowser/filebrowser/v2/fileutils"
 	"github.com/filebrowser/filebrowser/v2/rules"
-	"github.com/filebrowser/filebrowser/v2/blacklist"
 )
 
 var resourceGetHandler = withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
@@ -367,8 +367,13 @@ func verifyUploadIntegrityForPost(fs afero.Fs, filePath string, expectedSize int
 			return fmt.Errorf("checksum algorithm %s not supported", algo)
 		}
 
-		if actualHash != expectedHash {
-			return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHash, actualHash)
+		// Normalize hashes: convert to lowercase and remove any whitespace
+		// This ensures consistent comparison regardless of case or whitespace differences
+		expectedHashNormalized := strings.ToLower(strings.TrimSpace(expectedHash))
+		actualHashNormalized := strings.ToLower(strings.TrimSpace(actualHash))
+
+		if actualHashNormalized != expectedHashNormalized {
+			return fmt.Errorf("%s checksum mismatch: expected %s (normalized: %s), got %s (normalized: %s)", algo, expectedHash, expectedHashNormalized, actualHash, actualHashNormalized)
 		}
 	}
 

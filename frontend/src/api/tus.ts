@@ -30,8 +30,11 @@ export async function upload(
   }
   
   // Calculate file hash for integrity verification (required for TUS uploads)
+  // IMPORTANT: Calculate hash BEFORE creating tus.Upload to ensure file hasn't been read yet
   let checksumHeader = "";
   if (content instanceof Blob) {
+    // Pass the original content to calculateFileHashSafe, which will handle slicing internally
+    // Don't create a slice here to avoid double-slicing issues
     const hash = await calculateFileHashSafe(content, "sha256");
     if (!hash) {
       // Hash calculation failed - reject TUS upload
