@@ -74,7 +74,9 @@ const submit = async (event: Event) => {
   uri = uri.replace("//", "/");
 
   try {
-    await api.post(uri);
+    // Explicitly skip hash check for new file creation
+    // This ensures reliability regardless of content type or future Blob implementation changes
+    await api.post(uri, "", false, () => {}, true);
     router.push({ path: uri });
   } catch (e) {
     if (e instanceof Error) {

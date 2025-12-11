@@ -143,6 +143,9 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 			}
 		}
 
+		// Check if hash check should be skipped (e.g., for new file creation)
+		skipHashCheck := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Skip-Hash-Check"))) == "true"
+
 		// Parse expected size and checksum from headers (required for integrity verification)
 		var expectedSize int64 = -1
 		if sizeStr := r.Header.Get("X-Expected-Size"); sizeStr != "" {
@@ -153,13 +156,13 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 
 		expectedChecksums := parseChecksumHeaderForPost(r)
 
-		// Require checksum for file integrity verification
-		if len(expectedChecksums) == 0 {
+		// Require checksum for file integrity verification (unless explicitly skipped)
+		if !skipHashCheck && len(expectedChecksums) == 0 {
 			return http.StatusBadRequest, fmt.Errorf("checksum header is required for file integrity verification")
 		}
 
-		// Require expected size for file integrity verification
-		if expectedSize < 0 {
+		// Require expected size for file integrity verification (unless explicitly skipped)
+		if !skipHashCheck && expectedSize < 0 {
 			return http.StatusBadRequest, fmt.Errorf("X-Expected-Size header is required for file integrity verification")
 		}
 
@@ -169,11 +172,13 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 				return writeErr
 			}
 
-			// Verify file integrity (checksum and size are required)
-			if verifyErr := verifyUploadIntegrityForPost(d.user.Fs, r.URL.Path, expectedSize, expectedChecksums, d); verifyErr != nil {
-				// Remove file if integrity check fails
-				_ = d.user.Fs.RemoveAll(r.URL.Path)
-				return fmt.Errorf("upload integrity check failed: %w", verifyErr)
+			// Verify file integrity (checksum and size are required, unless explicitly skipped)
+			if !skipHashCheck {
+				if verifyErr := verifyUploadIntegrityForPost(d.user.Fs, r.URL.Path, expectedSize, expectedChecksums, d); verifyErr != nil {
+					// Remove file if integrity check fails
+					_ = d.user.Fs.RemoveAll(r.URL.Path)
+					return fmt.Errorf("upload integrity check failed: %w", verifyErr)
+				}
 			}
 
 			etag := fmt.Sprintf(`"%x%x"`, info.ModTime().UnixNano(), info.Size())

@@ -91,7 +91,8 @@ export async function post(
   url: string,
   content: ApiContent = "",
   overwrite = false,
-  onupload: any = () => {}
+  onupload: any = () => {},
+  skipHashCheck: boolean = false
 ) {
   // Use the pre-existing API if:
   const useResourcesApi =
@@ -104,7 +105,7 @@ export async function post(
     !(await useTus(content));
   
   if (useResourcesApi) {
-    return postResources(url, content, overwrite, onupload);
+    return postResources(url, content, overwrite, onupload, skipHashCheck);
   }
   
   // Try TUS upload, fall back to POST if it fails (but not for hash calculation failures)
@@ -119,7 +120,7 @@ export async function post(
     }
     // For other errors (network, server, etc.), fall back to regular POST
     console.warn("TUS upload failed, falling back to regular POST:", error);
-    return postResources(url, content, overwrite, onupload);
+    return postResources(url, content, overwrite, onupload, skipHashCheck);
   }
 }
 
@@ -127,7 +128,8 @@ async function postResources(
   url: string,
   content: ApiContent = "",
   overwrite = false,
-  onupload: any
+  onupload: any,
+  skipHashCheck: boolean = false
 ) {
   url = removePrefix(url);
 
@@ -136,7 +138,8 @@ async function postResources(
   let checksumHeader = "";
   
   // Calculate file size and hash for integrity verification (required for POST uploads)
-  if (content instanceof Blob) {
+  // Only calculate hash if skipHashCheck is false and content is a Blob
+  if (!skipHashCheck && content instanceof Blob) {
     expectedSizeHeader = content.size.toString();
     
     // Calculate hash for integrity verification (required by backend)
@@ -168,6 +171,12 @@ async function postResources(
       true
     );
     request.setRequestHeader("X-Auth", authStore.jwt);
+    
+    // Skip hash check if explicitly requested (e.g., for new file creation)
+    // This is more reliable than checking content instanceof Blob, as it doesn't depend on implementation details
+    if (skipHashCheck) {
+      request.setRequestHeader("X-Skip-Hash-Check", "true");
+    }
     
     // Add expected size header if available
     if (expectedSizeHeader) {

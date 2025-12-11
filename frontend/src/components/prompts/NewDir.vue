@@ -88,7 +88,10 @@ const submit = async (event: Event) => {
   uri = uri.replace("//", "/");
 
   try {
-    await api.post(uri);
+    // Explicitly skip hash check for new directory creation
+    // Note: Backend will return early for directory creation (URL ends with "/"),
+    // but this makes the intent explicit and ensures consistency
+    await api.post(uri, "", false, () => {}, true);
     if (props.redirect) {
       router.push({ path: uri });
     } else if (!props.base) {
