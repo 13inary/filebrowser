@@ -461,11 +461,18 @@ func verifyUploadIntegrity(fs afero.Fs, filePath string, expectedSize int64, exp
 		expectedHashTrimmed := strings.TrimSpace(expectedHash)
 		actualHashTrimmed := strings.TrimSpace(actualHash)
 
-		// Log hash verification result with timestamp
-		if actualHashTrimmed == expectedHashTrimmed {
-			log.Printf("[Upload Integrity] File hash verification passed: path=%s, size=%d, algorithm=%s, hash=%s", filePath, file.Size, algo, actualHashTrimmed)
-		} else {
-			log.Printf("[Upload Integrity] File hash verification failed: path=%s, size=%d, algorithm=%s, expected=%s, actual=%s", filePath, file.Size, algo, expectedHashTrimmed, actualHashTrimmed)
+		// Only log on failure with prominent output
+		if actualHashTrimmed != expectedHashTrimmed {
+			log.Printf("================================================")
+			log.Printf("!!! HASH VERIFICATION FAILED !!!")
+			log.Printf("================================================")
+			log.Printf("File: %s", filePath)
+			log.Printf("Size: %d bytes", file.Size)
+			log.Printf("Algorithm: %s", algo)
+			log.Printf("")
+			log.Printf("  [前端计算的Hash] (Expected): %s", expectedHashTrimmed)
+			log.Printf("  [后端计算的Hash] (Actual):   %s", actualHashTrimmed)
+			log.Printf("================================================")
 			return fmt.Errorf("%s checksum mismatch: expected %s, got %s", algo, expectedHashTrimmed, actualHashTrimmed)
 		}
 	}
