@@ -10,7 +10,11 @@ export async function calculateFileHash(
   const buffer = await file.arrayBuffer();
   
   // Convert algorithm name to Web Crypto API format
-  const cryptoAlgorithm = `SHA-${algorithm.toUpperCase().replace('SHA-', '')}`;
+  // Input: 'sha256' -> Output: 'SHA-256'
+  // Input: 'sha1' -> Output: 'SHA-1'
+  // Input: 'sha384' -> Output: 'SHA-384'
+  // Input: 'sha512' -> Output: 'SHA-512'
+  const cryptoAlgorithm = algorithm.toUpperCase().replace(/^SHA/, 'SHA-');
   
   const hashBuffer = await crypto.subtle.digest(
     cryptoAlgorithm as AlgorithmIdentifier,
