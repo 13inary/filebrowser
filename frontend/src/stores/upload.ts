@@ -18,6 +18,7 @@ export const useUploadStore = defineStore("upload", () => {
   const $showError = inject<IToastError>("$showError")!;
 
   let progressInterval: number | null = null;
+  let isProcessing = false; // Lock to prevent concurrent processUploads calls
 
   //
   // STATE
@@ -103,91 +104,110 @@ export const useUploadStore = defineStore("upload", () => {
   const isActiveUploadsOnLimit = () => activeUploads.value.size < UPLOADS_LIMIT;
 
   const processUploads = async () => {
-    // Check if all uploads are finished (either completed or failed)
-    if (!hasUnfinishedUploads()) {
-      const fileStore = useFileStore();
-      window.removeEventListener("beforeunload", beforeUnload);
-      
-      // Check if there are any failed uploads
-      const hasFailedUploads = allUploads.value.some((u) => u.failed);
-      
-      if (hasFailedUploads) {
-        // Show error state instead of success
-        buttons.done("upload");
-        // Don't reset immediately, let user see the error
-        // Reset after a delay to allow error message to be visible
-        setTimeout(() => {
-          reset();
-          fileStore.reload = true;
-        }, 3000);
-      } else {
-        // All uploads succeeded
-        buttons.success("upload");
-        reset();
-        fileStore.reload = true;
-      }
+    // Prevent concurrent execution
+    if (isProcessing) {
       return;
     }
-
-    if (isActiveUploadsOnLimit() && hasPendingUploads()) {
-      if (!hasActiveUploads()) {
-        // Update the state in a fixed time interval
-        progressInterval = window.setInterval(syncState, 1000);
-      }
-
-      const upload = nextUpload();
-      let uploadSucceeded = false;
-
-      try {
-        if (upload.type === "dir") {
-          await api.post(upload.path);
-          uploadSucceeded = true;
+    
+    isProcessing = true;
+    
+    try {
+      // Check if all uploads are finished (either completed or failed)
+      if (!hasUnfinishedUploads()) {
+        const fileStore = useFileStore();
+        window.removeEventListener("beforeunload", beforeUnload);
+        
+        // Check if there are any failed uploads
+        const hasFailedUploads = allUploads.value.some((u) => u.failed);
+        
+        if (hasFailedUploads) {
+          // Show error state instead of success
+          buttons.done("upload");
+          // Don't reset immediately, let user see the error
+          // Reset after a delay to allow error message to be visible
+          setTimeout(() => {
+            reset();
+            fileStore.reload = true;
+          }, 3000);
         } else {
-          const onUpload = (event: ProgressEvent) => {
-            upload.rawProgress.sentBytes = event.loaded;
-          };
-
-          await api.post(upload.path, upload.file!, upload.overwrite, onUpload);
-          uploadSucceeded = true;
+          // All uploads succeeded
+          buttons.success("upload");
+          reset();
+          fileStore.reload = true;
         }
-      } catch (err: any) {
-        // Mark upload as failed
-        upload.failed = true;
-        upload.error = err?.message || "Upload failed";
-        
-        // Show error to user (unless it's an abort)
-        if (err?.message !== "Upload aborted") {
-          // Extract error message from different error types
-          let errorMessage = "Upload failed";
-          if (err instanceof Error) {
-            errorMessage = err.message;
-          } else if (typeof err === "string") {
-            errorMessage = err;
-          } else if (err?.message) {
-            errorMessage = err.message;
-          } else if (err?.toString) {
-            errorMessage = err.toString();
-          }
-          
-          // Show detailed error message with file name
-          $showError(new Error(`上传失败: "${upload.name}"\n${errorMessage}`));
-        }
-        
-        // Remove from active uploads but keep in allUploads for tracking
-        activeUploads.value.delete(upload);
-        
-        // Update sentBytes to reflect the actual bytes sent before failure
-        sentBytes.value += upload.rawProgress.sentBytes - upload.sentBytes;
-        upload.sentBytes = upload.rawProgress.sentBytes;
-        
-        // Continue processing other uploads
-        processUploads();
         return;
       }
 
-      // Only finish upload if it succeeded
-      if (uploadSucceeded) {
-        finishUpload(upload);
+      if (isActiveUploadsOnLimit() && hasPendingUploads()) {
+        if (!hasActiveUploads()) {
+          // Update the state in a fixed time interval
+          progressInterval = window.setInterval(syncState, 1000);
+        }
+
+        const upload = nextUpload();
+        let uploadSucceeded = false;
+
+        try {
+          if (upload.type === "dir") {
+            await api.post(upload.path);
+            uploadSucceeded = true;
+          } else {
+            const onUpload = (event: ProgressEvent) => {
+              upload.rawProgress.sentBytes = event.loaded;
+            };
+
+            await api.post(upload.path, upload.file!, upload.overwrite, onUpload);
+            uploadSucceeded = true;
+          }
+        } catch (err: any) {
+          // Mark upload as failed
+          upload.failed = true;
+          upload.error = err?.message || "Upload failed";
+          
+          // Show error to user (unless it's an abort)
+          if (err?.message !== "Upload aborted") {
+            // Extract error message from different error types
+            let errorMessage = "Upload failed";
+            if (err instanceof Error) {
+              errorMessage = err.message;
+            } else if (typeof err === "string") {
+              errorMessage = err;
+            } else if (err?.message) {
+              errorMessage = err.message;
+            } else if (err?.toString) {
+              errorMessage = err.toString();
+            }
+            
+            // Show detailed error message with file name
+            $showError(new Error(`上传失败: "${upload.name}"\n${errorMessage}`));
+          }
+          
+          // Remove from active uploads but keep in allUploads for tracking
+          activeUploads.value.delete(upload);
+          
+          // Update sentBytes to reflect the actual bytes sent before failure
+          sentBytes.value += upload.rawProgress.sentBytes - upload.sentBytes;
+          upload.sentBytes = upload.rawProgress.sentBytes;
+          
+          // Continue processing other uploads (will be handled after unlock)
+          // Don't call processUploads() here directly to avoid recursion
+          return;
+        }
+
+        // Only finish upload if it succeeded
+        if (uploadSucceeded) {
+          finishUpload(upload);
+        }
+      }
+    } finally {
+      isProcessing = false;
+      
+      // After unlocking, check if there are more uploads to process
+      // Use setTimeout to avoid immediate recursion and allow state to settle
+      if (hasUnfinishedUploads()) {
+        setTimeout(() => {
+          processUploads();
+        }, 0);
       }
     }
   };
@@ -207,14 +227,16 @@ export const useUploadStore = defineStore("upload", () => {
     upload.file = null;
 
     activeUploads.value.delete(upload);
-    processUploads();
+    // Don't call processUploads() here directly - it will be called
+    // after the current processUploads() finishes (via finally block)
+    // This prevents concurrent execution and race conditions
   };
 
   const syncState = () => {
-    for (const upload of activeUploads.value) {
+    activeUploads.value.forEach((upload) => {
       sentBytes.value += upload.rawProgress.sentBytes - upload.sentBytes;
       upload.sentBytes = upload.rawProgress.sentBytes;
-    }
+    });
   };
 
   const reset = () => {
