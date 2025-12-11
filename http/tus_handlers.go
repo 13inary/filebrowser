@@ -256,6 +256,13 @@ func tusPatchHandler() handleFunc {
 			return http.StatusInternalServerError, fmt.Errorf("could not write to file: %w", err)
 		}
 
+		// Sync file to ensure data is written to disk
+		if syncFile, ok := openFile.(interface{ Sync() error }); ok {
+			if err := syncFile.Sync(); err != nil {
+				return http.StatusInternalServerError, fmt.Errorf("could not sync file: %w", err)
+			}
+		}
+
 		newOffset := uploadOffset + bytesWritten
 		w.Header().Set("Upload-Offset", strconv.FormatInt(newOffset, 10))
 

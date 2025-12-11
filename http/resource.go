@@ -280,6 +280,13 @@ func writeFile(afs afero.Fs, dst string, in io.Reader, fileMode, dirMode fs.File
 		return nil, err
 	}
 
+	// Sync file to ensure data is written to disk
+	if syncFile, ok := file.(interface{ Sync() error }); ok {
+		if err := syncFile.Sync(); err != nil {
+			return nil, fmt.Errorf("failed to sync file: %w", err)
+		}
+	}
+
 	// Gets the info about the file.
 	info, err := file.Stat()
 	if err != nil {
